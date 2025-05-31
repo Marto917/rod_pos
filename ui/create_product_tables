@@ -1,0 +1,18 @@
+import sqlite3
+
+conn = sqlite3.connect('db/pos.db')
+c = conn.cursor()
+
+c.execute('''
+    CREATE TABLE IF NOT EXISTS productos (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        nombre TEXT NOT NULL,
+        precio REAL NOT NULL,
+        stock INTEGER NOT NULL
+    )
+''')
+
+conn.commit()
+conn.close()
+
+print("Tabla 'productos' creada con éxito.")
