@@ -108,7 +108,7 @@ def open_arqueo_panel(user_id, user_name):
                 datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                 total_efectivo,
                 total_tarjeta,
-                0.0,  # Asumiendo que no hay otros métodos
+                0.0, 
                 total_efectivo + total_tarjeta,
                 diferencia_var.get(),
                 observaciones_var.get() or "Ninguna"

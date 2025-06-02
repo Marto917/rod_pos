@@ -1,4 +1,3 @@
-# admin.py
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import sqlite3
@@ -8,6 +7,7 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import os
 import shutil
 import json
+import sys
 
 def open_admin_panel(user_id, user_name):
     ventana = tk.Tk()
@@ -540,9 +540,17 @@ def open_admin_panel(user_id, user_name):
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
             archivo_backup = f'backups/pos_backup_{timestamp}.db'
             
-            shutil.copy2('db/pos.db', archivo_backup)
+            if getattr(sys, 'frozen', False):
+                db_path = os.path.join(os.path.dirname(sys.executable), 'db', 'pos.db')
+            else:
+                db_path = 'db/pos.db'
             
-            # Metadata para compatibilidad
+            if not os.path.exists(db_path):
+                messagebox.showerror("Error", f"No se encontró la base de datos en:\n{db_path}")
+                return
+                
+            shutil.copy2(db_path, archivo_backup)
+            
             metadata = {
                 "version_sistema": "1.0",
                 "fecha_backup": timestamp,
@@ -557,7 +565,7 @@ def open_admin_panel(user_id, user_name):
             
         except Exception as e:
             messagebox.showerror("Error", f"Error al crear backup:\n{str(e)}")
-
+        
     def exportar_backup():
         seleccionado = lista_backups.curselection()
         if not seleccionado:

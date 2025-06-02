@@ -2,11 +2,9 @@ from db_init import init_db
 from ui.login import open_login
 from ui.admin import open_admin_panel
 
-# Importación condicional para evitar errores
 try:
     from ui.sales import open_sales_panel
 except ImportError:
-    # Función de respaldo si sales.py no tiene la función
     def open_sales_panel(user_id, user_name):
         import tkinter as tk
         from tkinter import messagebox

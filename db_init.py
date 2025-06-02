@@ -1,12 +1,21 @@
-# db_init.py
 import sqlite3
 import os
 
 def init_db():
-    if not os.path.exists('db'):
-        os.makedirs('db')
-    
-    conn = sqlite3.connect('db/pos.db')
+    import sys
+
+    def resource_path(relative_path):
+        try:
+            base_path = sys._MEIPASS
+        except AttributeError:
+            base_path = os.path.abspath(".")
+        return os.path.join(base_path, relative_path)
+
+    db_path = os.path.join(os.path.abspath("."), "db", "pos.db")
+    if not os.path.exists("db"):
+        os.makedirs("db")
+    conn = sqlite3.connect(db_path)
+
     c = conn.cursor()
     
     # Tabla de usuarios

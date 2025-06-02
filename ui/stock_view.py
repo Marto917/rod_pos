@@ -1,4 +1,3 @@
-# stock_view.py
 import tkinter as tk
 from tkinter import ttk, messagebox
 import sqlite3
@@ -71,11 +70,9 @@ def open_stock_view(user_id, user_name):
         except sqlite3.Error as e:
             messagebox.showerror("Error", f"Error al buscar productos:\n{str(e)}")
 
-    # Asignar la función al botón después de su definición
     btn_buscar.config(command=buscar_productos)
     entry_busqueda.bind('<KeyRelease>', buscar_productos)
 
-    # Treeview
     tree = ttk.Treeview(main_frame, columns=('ID', 'Código', 'Nombre', 'Categoría', 'Stock', 'Precio'), show='headings')
     tree.heading('ID', text='ID')
     tree.heading('Código', text='Código Barras')
