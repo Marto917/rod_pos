@@ -631,6 +631,7 @@
   ('kiwisolver.exceptions',
    'C:\\Users\\Marti\\AppData\\Roaming\\Python\\Python311\\site-packages\\kiwisolver\\exceptions.py',
    'PYMODULE'),
+  ('licencia', 'C:\\Users\\Marti\\Desktop\\rod_pos\\licencia.py', 'PYMODULE'),
   ('logging', 'C:\\Python311\\Lib\\logging\\__init__.py', 'PYMODULE'),
   ('lzma', 'C:\\Python311\\Lib\\lzma.py', 'PYMODULE'),
   ('matplotlib',

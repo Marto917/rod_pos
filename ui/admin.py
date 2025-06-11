@@ -8,6 +8,13 @@ import os
 import shutil
 import json
 import sys
+from licencia import obtener_hwid, activar_licencia, verificar_licencia
+import hashlib
+import base64
+from datetime import datetime
+import os
+from licencia import ARCHIVO_LICENCIA
+from licencia import obtener_dias_restantes
 
 def open_admin_panel(user_id, user_name):
     ventana = tk.Tk()
@@ -637,6 +644,37 @@ def open_admin_panel(user_id, user_name):
             
         except Exception as e:
             messagebox.showerror("Error", f"Error al verificar:\n{str(e)}")
+
+    # ----------------------------
+    # PESTAÑA LICENCIA
+    # ----------------------------
+    tab_licencia = ttk.Frame(notebook)
+    notebook.add(tab_licencia, text='🔑 Licencia')
+
+    ttk.Label(tab_licencia, text="HWID del cliente (solo lectura):").pack(pady=5)
+    hwid_var = tk.StringVar(value=obtener_hwid())
+    ttk.Entry(tab_licencia, textvariable=hwid_var, state='readonly', width=50).pack(pady=5)
+
+    ttk.Label(tab_licencia, text="Código de licencia (pegalo aquí):").pack(pady=5)
+    licencia_var = tk.StringVar()
+    entry_licencia = ttk.Entry(tab_licencia, textvariable=licencia_var, width=60)
+    entry_licencia.pack(pady=5)
+
+    def activar():
+        codigo = licencia_var.get()
+        if activar_licencia(codigo):
+            messagebox.showinfo("Licencia", "✅ Licencia activada correctamente.")
+        else:
+            messagebox.showerror("Licencia", "❌ Licencia inválida o vencida.")
+
+    ttk.Button(tab_licencia, text="Activar Licencia", command=activar).pack(pady=10)
+
+    dias_restantes = obtener_dias_restantes()
+    texto_restante = (
+        f"⏳ Quedan {dias_restantes} días de licencia." if dias_restantes is not None else
+        "❌ Licencia no cargada."
+    )
+    ttk.Label(tab_licencia, text=texto_restante, font=("Arial", 10, "italic")).pack(pady=5)
 
     # ----------------------------
     # BOTÓN DE SALIDA
