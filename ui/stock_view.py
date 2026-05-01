@@ -1,16 +1,20 @@
 import tkinter as tk
 from tkinter import ttk, messagebox
 import sqlite3
+from db_init import get_db_path
 
 def open_stock_view(user_id, user_name):
     ventana = tk.Tk()
-    ventana.title(f"Stock - {user_name}")
+    ventana.title("Stock - %s" % user_name)
     ventana.geometry("1000x600")
     ventana.state('zoomed')
     ventana.configure(bg='#f0f0f0')
 
-    # Conexión a BD
-    conn = sqlite3.connect('db/pos.db')
+    try:
+        conn = sqlite3.connect(get_db_path())
+    except sqlite3.Error as e:
+        messagebox.showerror("Error BD", "No se pudo conectar con la base de datos.\n%s" % str(e))
+        return
     cursor = conn.cursor()
 
     # Estilos
@@ -68,7 +72,7 @@ def open_stock_view(user_id, user_name):
                 tree.insert('', 'end', values=row)
                 
         except sqlite3.Error as e:
-            messagebox.showerror("Error", f"Error al buscar productos:\n{str(e)}")
+            messagebox.showerror("Error", "Error al buscar productos:\n%s" % str(e))
 
     btn_buscar.config(command=buscar_productos)
     entry_busqueda.bind('<KeyRelease>', buscar_productos)
@@ -95,12 +99,22 @@ def open_stock_view(user_id, user_name):
     scrollbar.pack(side='right', fill='y')
     tree.configure(yscrollcommand=scrollbar.set)
 
-    # Atajo de teclado para mostrar/ocultar búsqueda
     ventana.bind('<Control-L>', lambda e: toggle_search())
     ventana.bind('<Control-l>', lambda e: toggle_search())
 
-    # Carga inicial
-    buscar_productos()
+    def al_cerrar():
+        try:
+            conn.close()
+        except Exception:
+            pass
+        ventana.destroy()
 
-    ventana.mainloop()
-    conn.close()
+    ventana.protocol("WM_DELETE_WINDOW", al_cerrar)
+    buscar_productos()
+    try:
+        ventana.mainloop()
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass

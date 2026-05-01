@@ -8,13 +8,10 @@ import os
 import shutil
 import json
 import sys
-from licencia import obtener_hwid, activar_licencia, verificar_licencia
-import hashlib
-import base64
-from datetime import datetime
-import os
-from licencia import ARCHIVO_LICENCIA
-from licencia import obtener_dias_restantes
+from db_init import get_db_path, get_base_dir
+from fiscal_service import get_fiscal_config, save_fiscal_config
+from licencia import obtener_hwid, activar_licencia
+from licencia import obtener_dias_restantes, obtener_fecha_vencimiento
 
 def open_admin_panel(user_id, user_name):
     ventana = tk.Tk()
@@ -22,8 +19,9 @@ def open_admin_panel(user_id, user_name):
     ventana.state('zoomed')
     ventana.configure(bg='#f0f0f0')
     
+    base_dir = get_base_dir()
     # Conexión a BD
-    conn = sqlite3.connect('db/pos.db')
+    conn = sqlite3.connect(get_db_path())
     cursor = conn.cursor()
     
     # ----------------------------
@@ -36,9 +34,8 @@ def open_admin_panel(user_id, user_name):
             plt.close('all')
             ventana.quit()
             ventana.destroy()
-            import os
             os._exit(0)
-        except Exception as e:
+        except Exception:
             import sys
             sys.exit(0)
 
@@ -431,14 +428,9 @@ def open_admin_panel(user_id, user_name):
 
     def actualizar_reporte():
         try:
-            # Limpiar gráfico anterior
             if hasattr(tab_reportes, 'canvas'):
                 tab_reportes.canvas.get_tk_widget().destroy()
-            
-            # Crear nuevo gráfico
             fig, ax = plt.subplots(figsize=(8, 4))
-            
-            # Consulta SQL para reportes
             cursor.execute("""
                 SELECT date(fecha) as dia, SUM(total) as total
                 FROM ventas 
@@ -446,31 +438,25 @@ def open_admin_panel(user_id, user_name):
                 GROUP BY date(fecha)
                 ORDER BY date(fecha)
             """, (fecha_inicio.get(), fecha_fin.get()))
-            
             datos = cursor.fetchall()
-            
             if datos:
                 fechas = [d[0] for d in datos]
                 totales = [d[1] for d in datos]
-                
                 ax.bar(fechas, totales, color='#4CAF50')
                 ax.set_title('Ventas por Día')
                 ax.set_xlabel('Fecha')
                 ax.set_ylabel('Total ($)')
                 plt.xticks(rotation=45)
                 fig.tight_layout()
-                
-                # Mostrar gráfico
                 tab_reportes.canvas = FigureCanvasTkAgg(fig, master=tab_reportes)
                 tab_reportes.canvas.draw()
                 tab_reportes.canvas.get_tk_widget().pack(fill='both', expand=True)
             else:
                 messagebox.showinfo("Información", "No hay datos de ventas en el rango seleccionado")
-                
         except sqlite3.Error as e:
-            messagebox.showerror("Error BD", f"Error en consulta:\n{str(e)}")
+            messagebox.showerror("Error BD", "Error en consulta:\n%s" % str(e))
         except Exception as e:
-            messagebox.showerror("Error", f"Error al generar reporte:\n{str(e)}")
+            messagebox.showerror("Error", "Error al generar reporte:\n%s" % str(e))
 
     # Controles de fecha
     controles_frame = ttk.Frame(tab_reportes)
@@ -527,11 +513,12 @@ def open_admin_panel(user_id, user_name):
 
     def actualizar_lista_backups():
         lista_backups.delete(0, tk.END)
-        if os.path.exists('backups'):
+        backups_dir = os.path.join(base_dir, 'backups')
+        if os.path.exists(backups_dir):
             try:
                 archivos = sorted(
-                    [f for f in os.listdir('backups') if f.endswith('.db')],
-                    key=lambda x: os.path.getmtime(os.path.join('backups', x)),
+                    [f for f in os.listdir(backups_dir) if f.endswith('.db')],
+                    key=lambda x: os.path.getmtime(os.path.join(backups_dir, x)),
                     reverse=True
                 )
                 for archivo in archivos:
@@ -541,16 +528,13 @@ def open_admin_panel(user_id, user_name):
 
     def hacer_backup():
         try:
-            if not os.path.exists('backups'):
-                os.makedirs('backups')
+            backups_dir = os.path.join(base_dir, 'backups')
+            if not os.path.exists(backups_dir):
+                os.makedirs(backups_dir)
             
             timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-            archivo_backup = f'backups/pos_backup_{timestamp}.db'
-            
-            if getattr(sys, 'frozen', False):
-                db_path = os.path.join(os.path.dirname(sys.executable), 'db', 'pos.db')
-            else:
-                db_path = 'db/pos.db'
+            archivo_backup = os.path.join(backups_dir, f'pos_backup_{timestamp}.db')
+            db_path = get_db_path()
             
             if not os.path.exists(db_path):
                 messagebox.showerror("Error", f"No se encontró la base de datos en:\n{db_path}")
@@ -564,7 +548,7 @@ def open_admin_panel(user_id, user_name):
                 "estructura_bd": obtener_estructura_bd()
             }
             
-            with open(f'backups/pos_backup_{timestamp}.meta', 'w') as f:
+            with open(os.path.join(backups_dir, f'pos_backup_{timestamp}.meta'), 'w') as f:
                 json.dump(metadata, f)
             
             messagebox.showinfo("Éxito", f"Backup creado:\n{archivo_backup}")
@@ -588,9 +572,11 @@ def open_admin_panel(user_id, user_name):
         
         if destino:
             try:
-                shutil.copy2(f'backups/{archivo}', destino)
-                if os.path.exists(f'backups/{archivo[:-3]}.meta'):
-                    shutil.copy2(f'backups/{archivo[:-3]}.meta', f'{destino[:-3]}.meta')
+                backups_dir = os.path.join(base_dir, 'backups')
+                shutil.copy2(os.path.join(backups_dir, archivo), destino)
+                meta_src = os.path.join(backups_dir, f'{archivo[:-3]}.meta')
+                if os.path.exists(meta_src):
+                    shutil.copy2(meta_src, f'{destino[:-3]}.meta')
                 messagebox.showinfo("Éxito", f"Backup exportado a:\n{destino}")
             except Exception as e:
                 messagebox.showerror("Error", f"No se pudo exportar:\n{str(e)}")
@@ -610,7 +596,7 @@ def open_admin_panel(user_id, user_name):
             return
             
         archivo = lista_backups.get(seleccionado)
-        meta_file = f'backups/{archivo[:-3]}.meta'
+        meta_file = os.path.join(base_dir, 'backups', f'{archivo[:-3]}.meta')
         
         if not os.path.exists(meta_file):
             messagebox.showwarning("Advertencia", "Este backup no tiene metadata de compatibilidad")
@@ -646,35 +632,169 @@ def open_admin_panel(user_id, user_name):
             messagebox.showerror("Error", f"Error al verificar:\n{str(e)}")
 
     # ----------------------------
+    # PESTAÑA CONFIG ARCA / TICKET
+    # ----------------------------
+    tab_fiscal = ttk.Frame(notebook)
+    notebook.add(tab_fiscal, text='ARCA/Ticket')
+
+    fiscal_cfg = get_fiscal_config()
+    fiscal_vars = {}
+    campos = [
+        ("Razon social", "empresa_razon_social"),
+        ("CUIT empresa", "empresa_cuit"),
+        ("IIBB", "empresa_iibb"),
+        ("Domicilio", "empresa_domicilio"),
+        ("Condicion IVA", "empresa_condicion_iva"),
+        ("Punto de venta", "arca_punto_venta"),
+        ("Ambiente (produccion/homologacion)", "arca_ambiente"),
+        ("CUIT representada ARCA", "arca_cuit_representada"),
+        ("Ruta certificado CRT", "arca_cert_path"),
+        ("Ruta clave KEY", "arca_key_path"),
+        ("Ruta logo ticket", "ticket_logo_path"),
+        ("Pie ticket", "ticket_pie_texto"),
+        ("Ancho ticket mm", "ticket_ancho_mm"),
+        ("Incluir logo (1/0)", "ticket_incluir_logo"),
+        ("Auto imprimir ticket (1/0)", "ticket_auto_imprimir"),
+    ]
+    form = ttk.Frame(tab_fiscal, padding=12)
+    form.pack(fill="both", expand=True)
+    for idx, (label, key) in enumerate(campos):
+        ttk.Label(form, text=label + ":").grid(row=idx, column=0, sticky="e", padx=5, pady=4)
+        fiscal_vars[key] = tk.StringVar(value=fiscal_cfg.get(key, ""))
+        ttk.Entry(form, textvariable=fiscal_vars[key], width=58).grid(row=idx, column=1, sticky="w", padx=5, pady=4)
+    ttk.Label(
+        form,
+        text="Nota: para emitir ARCA en produccion necesitás cert/key validos y pyafipws instalado.",
+        font=("Arial", 9, "italic"),
+    ).grid(row=len(campos), column=0, columnspan=2, pady=(10, 6), sticky="w")
+
+    def guardar_config_fiscal():
+        data = {k: v.get().strip() for k, v in fiscal_vars.items()}
+        errores = []
+        cuit = data.get("empresa_cuit", "")
+        if cuit and (not cuit.isdigit() or len(cuit) != 11):
+            errores.append("CUIT empresa debe tener 11 digitos.")
+        cuit_rep = data.get("arca_cuit_representada", "")
+        if cuit_rep and (not cuit_rep.isdigit() or len(cuit_rep) != 11):
+            errores.append("CUIT representada ARCA debe tener 11 digitos.")
+        pto = data.get("arca_punto_venta", "")
+        if not pto.isdigit() or int(pto) <= 0:
+            errores.append("Punto de venta debe ser numerico mayor a 0.")
+        ambiente = (data.get("arca_ambiente", "") or "").lower()
+        if ambiente not in ("produccion", "homologacion"):
+            errores.append("Ambiente debe ser 'produccion' o 'homologacion'.")
+        ancho = data.get("ticket_ancho_mm", "")
+        if (not ancho.isdigit()) or int(ancho) < 40 or int(ancho) > 120:
+            errores.append("Ancho ticket mm debe estar entre 40 y 120.")
+        cert_path = data.get("arca_cert_path", "")
+        if cert_path and not os.path.exists(cert_path):
+            errores.append("No existe la ruta del certificado CRT.")
+        key_path = data.get("arca_key_path", "")
+        if key_path and not os.path.exists(key_path):
+            errores.append("No existe la ruta de la clave KEY.")
+        logo_path = data.get("ticket_logo_path", "")
+        if logo_path and not os.path.exists(logo_path):
+            errores.append("No existe la ruta del logo de ticket.")
+        auto_print = data.get("ticket_auto_imprimir", "")
+        if auto_print not in ("0", "1"):
+            errores.append("Auto imprimir ticket debe ser 1 o 0.")
+        if errores:
+            messagebox.showerror("ARCA/Ticket", "\n".join(errores), parent=ventana)
+            return
+        save_fiscal_config(data)
+        messagebox.showinfo("ARCA/Ticket", "Configuracion guardada.")
+
+    def ayuda_impresion():
+        msg = (
+            "Impresion de ticket:\n"
+            "1) En Windows, configurá la Xprinter como impresora predeterminada.\n"
+            "2) El sistema imprime enviando el PDF al comando print del sistema.\n"
+            "3) Si querés imprimir sin preguntar en cada venta, poné 'Auto imprimir ticket' en 1.\n"
+            "4) Recomendado: ancho ticket 58 mm."
+        )
+        messagebox.showinfo("Ayuda impresion", msg, parent=ventana)
+
+    ttk.Button(form, text="Guardar configuracion", command=guardar_config_fiscal).grid(
+        row=len(campos) + 1, column=1, sticky="w", pady=8
+    )
+    ttk.Button(form, text="Ayuda impresion", command=ayuda_impresion).grid(
+        row=len(campos) + 2, column=1, sticky="w", pady=4
+    )
+
+    # ----------------------------
     # PESTAÑA LICENCIA
     # ----------------------------
     tab_licencia = ttk.Frame(notebook)
     notebook.add(tab_licencia, text='🔑 Licencia')
 
-    ttk.Label(tab_licencia, text="HWID del cliente (solo lectura):").pack(pady=5)
-    hwid_var = tk.StringVar(value=obtener_hwid())
-    ttk.Entry(tab_licencia, textvariable=hwid_var, state='readonly', width=50).pack(pady=5)
+    # Instrucciones para el cliente
+    ttk.Label(
+        tab_licencia,
+        text="Para activar o renovar: 1) Copiá el HWID y enviálo a tu proveedor. "
+             "2) Pegá el código que te envíen abajo y pulsá Activar.",
+        font=("Arial", 10),
+        wraplength=500,
+    ).pack(pady=(10, 15))
 
-    ttk.Label(tab_licencia, text="Código de licencia (pegalo aquí):").pack(pady=5)
+    # HWID + botón copiar
+    f_hwid = ttk.Frame(tab_licencia)
+    f_hwid.pack(pady=5)
+    ttk.Label(f_hwid, text="HWID de este equipo:").pack(side="left", padx=(0, 8))
+    hwid_var = tk.StringVar(value=obtener_hwid())
+    ttk.Entry(f_hwid, textvariable=hwid_var, state='readonly', width=45).pack(side="left", padx=5)
+
+    def copiar_hwid():
+        ventana.clipboard_clear()
+        ventana.clipboard_append(hwid_var.get())
+        messagebox.showinfo("Copiado", "HWID copiado al portapapeles. Envialo a tu proveedor.", parent=ventana)
+
+    ttk.Button(f_hwid, text="Copiar HWID", command=copiar_hwid).pack(side="left")
+
+    ttk.Label(tab_licencia, text="Código de licencia (pegá el que te enviaron):").pack(pady=(15, 5))
     licencia_var = tk.StringVar()
-    entry_licencia = ttk.Entry(tab_licencia, textvariable=licencia_var, width=60)
+    entry_licencia = ttk.Entry(tab_licencia, textvariable=licencia_var, width=65)
     entry_licencia.pack(pady=5)
 
-    def activar():
-        codigo = licencia_var.get()
-        if activar_licencia(codigo):
-            messagebox.showinfo("Licencia", "✅ Licencia activada correctamente.")
+    # Estado actual (se actualiza después de activar)
+    estado_licencia_var = tk.StringVar()
+    def actualizar_estado_licencia():
+        dias = obtener_dias_restantes()
+        fecha_venc = obtener_fecha_vencimiento()
+        if fecha_venc == "PERPETUA":
+            estado_licencia_var.set("Licencia activa de por vida (perpetua).")
+            return
+        if dias is not None and fecha_venc:
+            try:
+                from datetime import datetime as dt
+                f = dt.strptime(fecha_venc, "%Y-%m-%d").strftime("%d/%m/%Y")
+                estado_licencia_var.set(f"⏳ Quedan {dias} días. Vence: {f}")
+            except Exception:
+                estado_licencia_var.set(f"⏳ Quedan {dias} días de licencia.")
+        elif fecha_venc:
+            estado_licencia_var.set(f"⚠️ Licencia vencida (vencía: {fecha_venc})")
         else:
-            messagebox.showerror("Licencia", "❌ Licencia inválida o vencida.")
+            estado_licencia_var.set("❌ Sin licencia activa. Activá un código para usar como vendedor.")
 
-    ttk.Button(tab_licencia, text="Activar Licencia", command=activar).pack(pady=10)
+    ttk.Label(tab_licencia, textvariable=estado_licencia_var, font=("Arial", 10, "italic")).pack(pady=8)
+    actualizar_estado_licencia()
 
-    dias_restantes = obtener_dias_restantes()
-    texto_restante = (
-        f"⏳ Quedan {dias_restantes} días de licencia." if dias_restantes is not None else
-        "❌ Licencia no cargada."
-    )
-    ttk.Label(tab_licencia, text=texto_restante, font=("Arial", 10, "italic")).pack(pady=5)
+    def activar():
+        codigo = licencia_var.get().strip()
+        if not codigo:
+            messagebox.showwarning("Licencia", "Ingresá el código que te envió el proveedor.", parent=ventana)
+            return
+        if activar_licencia(codigo):
+            messagebox.showinfo("Licencia", "✅ Licencia activada correctamente.", parent=ventana)
+            actualizar_estado_licencia()
+            entry_licencia.delete(0, tk.END)
+        else:
+            messagebox.showerror(
+                "Licencia",
+                "❌ El código es inválido, está vencido o ya fue usado en este equipo.",
+                parent=ventana,
+            )
+
+    ttk.Button(tab_licencia, text="Activar licencia", command=activar).pack(pady=10)
 
     # ----------------------------
     # BOTÓN DE SALIDA

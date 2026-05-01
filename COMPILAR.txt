@@ -1,0 +1,25 @@
+========================================
+  CÓMO COMPILAR ROD POS (generar .exe)
+========================================
+
+1. Instalar PyInstaller (una vez):
+   py -m pip install pyinstaller
+
+2. Instalar dependencias del proyecto (si no las tenés):
+   py -m pip install pillow fpdf2 matplotlib pyafipws
+
+3. Compilar desde la carpeta del proyecto (rod_pos):
+   py -m PyInstaller RodPOS.spec
+
+4. El ejecutable queda en:
+   dist\RodPOS.exe
+
+5. Para entregar al cliente:
+   - Copiá la carpeta "dist" completa (ahí está RodPOS.exe).
+   - Dentro de dist debe estar la carpeta "db" (con pos.db si querés una BD inicial).
+   - El .exe crea "db", "comprobantes", "backups", "licencia.dat" junto a él al usarse.
+
+   El .spec ya incluye: ui (imágenes), db. Si db está vacía o no existe,
+   el programa crea la BD al iniciar.
+
+========================================
