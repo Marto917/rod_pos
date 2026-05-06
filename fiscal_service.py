@@ -2,6 +2,8 @@ import json
 import os
 import re
 import sqlite3
+import ssl
+import urllib.request
 import xml.etree.ElementTree as ET
 from datetime import datetime
 from decimal import ROUND_HALF_UP, Decimal
@@ -84,10 +86,72 @@ def _et_parse_notificar_si_falla(xml_str, contexto):
         _debug_afip_log("ParseError ET — %s — XML completo" % contexto, xml_str)
 
 
+def _descargar_wsdl_saneado(url, cache_dir, nombre_archivo):
+    """
+    Descarga el WSDL crudo, lo guarda para debug y extrae solo el primer bloque
+    <definitions>...</definitions> para evitar basura agregada por proxy/portal.
+    """
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "RodPOS/1.0",
+            "Accept": "text/xml,application/xml,*/*;q=0.8",
+        },
+    )
+
+    raw = None
+    # Intento normal (seguro)
+    try:
+        ctx = ssl.create_default_context()
+        with urllib.request.urlopen(req, timeout=20, context=ctx) as resp:
+            raw = resp.read()
+    except Exception as e1:
+        # Fallback para servidores legacy con DH débil (caso reportado: DH_KEY_TOO_SMALL)
+        msg = str(e1)
+        if "DH_KEY_TOO_SMALL" in msg or "dh key too small" in msg.lower():
+            _debug_afip_log(
+                "WSDL descarga fallback SSL legacy",
+                "Primer intento fallo con '%s'. Reintentando con SECLEVEL=1." % msg,
+            )
+            ctx2 = ssl.create_default_context()
+            try:
+                ctx2.set_ciphers("DEFAULT:@SECLEVEL=1")
+            except Exception:
+                pass
+            with urllib.request.urlopen(req, timeout=20, context=ctx2) as resp:
+                raw = resp.read()
+        else:
+            raise
+
+    txt = _texto_debug(raw).replace("\x00", "").lstrip("\ufeff")
+    _debug_afip_log("WSDL crudo descargado (%s)" % url, txt)
+
+    m = re.search(
+        r"(<\?xml[^>]*\?>\s*)?<(?:(?:\w+):)?definitions\b[\s\S]*?</(?:(?:\w+):)?definitions>",
+        txt,
+        flags=re.IGNORECASE,
+    )
+    saneado = m.group(0).strip() if m else txt.strip()
+
+    if (not saneado) or (not saneado.startswith("<")):
+        raise RuntimeError(
+            "WSDL inválido para %s: respuesta vacía o no XML." % url
+        )
+
+    # Validación XML (informativa, sin abortar por esta vía).
+    _et_parse_notificar_si_falla(saneado, "WSDL saneado %s" % url)
+
+    wsdl_path = os.path.join(cache_dir, nombre_archivo)
+    with open(wsdl_path, "w", encoding="utf-8", errors="replace") as f:
+        f.write(saneado)
+    return wsdl_path
+
+
 CONFIG_KEYS = [
     "empresa_razon_social",
     "empresa_cuit",
     "empresa_iibb",
+    "empresa_inicio_actividades",
     "empresa_domicilio",
     "empresa_condicion_iva",
     "arca_punto_venta",
@@ -203,6 +267,22 @@ def _cuit_solo_digitos(cuit):
     return "".join(c for c in (cuit or "") if c.isdigit())
 
 
+def _normalizar_tipo_comprobante_por_emisor(tipo_solicitado, cfg):
+    """
+    Ajusta el tipo de comprobante según condición IVA del emisor.
+    Si el emisor es monotributista y se pide A/B, se emite C.
+    """
+    tipo = (tipo_solicitado or "B").strip().upper()
+    cond = (cfg.get("empresa_condicion_iva") or "").strip().lower()
+    es_mono = "monotrib" in cond
+    if es_mono and tipo in ("A", "B"):
+        return "C", (
+            "Emisor configurado como monotributista: se reemplazó comprobante %s por C."
+            % tipo
+        )
+    return tipo, ""
+
+
 def _es_error_xml_corrupto(msg):
     m = (msg or "").lower()
     return (
@@ -247,8 +327,34 @@ def _emitir_arca_wsfe(payload, cfg):
 
     cert = cfg["arca_cert_path"].strip()
     key = cfg["arca_key_path"].strip()
+    if not cert or not os.path.isfile(cert):
+        raise FileNotFoundError(
+            "No existe el archivo .crt configurado para ARCA: %s" % (cert or "<vacio>")
+        )
+    if not key or not os.path.isfile(key):
+        raise FileNotFoundError(
+            "No existe el archivo .key configurado para ARCA: %s" % (key or "<vacio>")
+        )
     cache_dir = os.path.join(get_base_dir(), "cache_arca")
     os.makedirs(cache_dir, exist_ok=True)
+    wsaa_wsdl_local = None
+    wsfe_wsdl_local = None
+    try:
+        wsaa_wsdl_local = _descargar_wsdl_saneado(wsdl_aa, cache_dir, "wsaa_wsdl_saneado.xml")
+    except Exception as e:
+        _debug_afip_log("Error descargando/saneando WSDL WSAA", str(e))
+        raise RuntimeError(
+            "Error leyendo WSDL WSAA de ARCA. Posible proxy/firewall/portal cautivo inyectando contenido. Detalle: %s"
+            % e
+        ) from e
+    try:
+        wsfe_wsdl_local = _descargar_wsdl_saneado(wsdl_fe, cache_dir, "wsfe_wsdl_saneado.xml")
+    except Exception as e:
+        _debug_afip_log(
+            "Error descargando/saneando WSDL WSFE (se usa URL directa como fallback)",
+            str(e),
+        )
+        wsfe_wsdl_local = None
 
     _debug_afip_log(
         "URLs y ambiente ARCA (una vez por emision)",
@@ -301,14 +407,23 @@ def _emitir_arca_wsfe(payload, cfg):
 
         wsaa = WSAA()
         wsaa.LanzarExcepciones = True
-        ta = wsaa.Autenticar(
-            "wsfe",
-            cert,
-            key,
-            wsdl=wsdl_aa,
-            cacert=True,
-            cache=cache_dir,
-        )
+        try:
+            ta = wsaa.Autenticar(
+                "wsfe",
+                cert,
+                key,
+            wsdl=wsaa_wsdl_local or wsdl_aa,
+                cacert=True,
+                cache=cache_dir,
+            )
+        except Exception as e_wsaa:
+            detalle = "%s: %s" % (e_wsaa.__class__.__name__, str(e_wsaa))
+            _debug_afip_log(
+                "WSAA exception exacta",
+                "Excepcion Python: %s\nWSAA.Excepcion: %s\nWSAA.Traceback: %s"
+                % (detalle, getattr(wsaa, "Excepcion", ""), getattr(wsaa, "Traceback", "")),
+            )
+            raise RuntimeError("Error de Autenticación WSAA: %s" % detalle) from e_wsaa
         _debug_afip_log(
             "WSAA despues de Autenticar (SOAP / TA)",
             "%s\n%s"
@@ -355,11 +470,11 @@ def _emitir_arca_wsfe(payload, cfg):
 
         ws = WSFEv1()
         ws.LanzarExcepciones = True
-        ok = ws.Conectar(cache_dir, wsdl_fe, "", None, True)
+        ok = ws.Conectar(cache_dir, wsfe_wsdl_local or wsdl_fe, "", None, True)
         _debug_afip_log(
             "WSFE despues de Conectar (intento %d)" % numero,
             "WSDL WSFE: %s\n%s"
-            % (wsdl_fe, _soap_crudo(ws)),
+            % ((wsfe_wsdl_local or wsdl_fe), _soap_crudo(ws)),
         )
         if not ok:
             raise RuntimeError(ws.Excepcion or "No se pudo conectar a WSFE (ARCA).")
@@ -374,23 +489,39 @@ def _emitir_arca_wsfe(payload, cfg):
         ws.Cuit = cuit_rep
 
         pto_vta = int(cfg["arca_punto_venta"] or "1")
-        cbte_tipo = 6 if payload["tipo_comprobante"] == "B" else 1
-        tipo_doc = 99 if payload["tipo_comprobante"] == "B" else 80
-        nro_doc = 0 if payload["tipo_comprobante"] == "B" else int(payload["cliente_doc"])
+        _debug_afip_log(
+            "Punto de venta utilizado en emision",
+            "arca_punto_venta=%s (configurado)"
+            % pto_vta,
+        )
+        tipo_emitir, aviso_tipo = _normalizar_tipo_comprobante_por_emisor(
+            payload["tipo_comprobante"], cfg
+        )
+        cbte_tipo_map = {"A": 1, "B": 6, "C": 11}
+        cbte_tipo = cbte_tipo_map.get(tipo_emitir, 6)
+        tipo_doc = 80 if tipo_emitir == "A" else 99
+        nro_doc = int(payload["cliente_doc"]) if tipo_emitir == "A" else 0
         # RG 5616 / WSFE: obligatorio CondicionIVAReceptorId (error 10242 si falta).
-        # B + CF Doc 99/0 → 5 Consumidor Final. A + CUIT → 1 RI (ajustar si el cliente es MT/exento).
-        cond_iva_rec = 5 if payload["tipo_comprobante"] == "B" else 1
-        imp_total = float(
-            Decimal(str(payload["total"])).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-        )
-        neto_d = (Decimal(str(imp_total)) / Decimal("1.21")).quantize(
+        # B/C + CF Doc 99/0 → 5 Consumidor Final. A + CUIT → 1 RI.
+        cond_iva_rec = 1 if tipo_emitir == "A" else 5
+        imp_total_d = Decimal(str(payload["total"])).quantize(
             Decimal("0.01"), rounding=ROUND_HALF_UP
         )
-        iva_d = (Decimal(str(imp_total)) - neto_d).quantize(
-            Decimal("0.01"), rounding=ROUND_HALF_UP
-        )
-        imp_neto = float(neto_d)
-        imp_iva = float(iva_d)
+        # Factura C (cbte_tipo 11): AFIP exige ImpIVA=0 y NO informar objeto IVA.
+        if cbte_tipo == 11:
+            imp_neto_d = imp_total_d
+            imp_iva_d = Decimal("0.00")
+        else:
+            imp_neto_d = (imp_total_d / Decimal("1.21")).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP
+            )
+            imp_iva_d = (imp_total_d - imp_neto_d).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP
+            )
+
+        imp_total = float(imp_total_d)
+        imp_neto = float(imp_neto_d)
+        imp_iva = float(imp_iva_d)
 
         ultimo = ws.CompUltimoAutorizado(cbte_tipo, pto_vta) or 0
         _debug_afip_log(
@@ -417,7 +548,8 @@ def _emitir_arca_wsfe(payload, cfg):
             fecha_cbte=fecha,
             condicion_iva_receptor_id=cond_iva_rec,
         )
-        ws.AgregarIva(5, imp_neto, imp_iva)  # 21%
+        if cbte_tipo != 11:
+            ws.AgregarIva(5, imp_neto, imp_iva)  # 21%
 
         ok_cae = ws.CAESolicitar()
         _debug_afip_log("WSFE tras CAESolicitar", _soap_crudo(ws))
@@ -429,7 +561,8 @@ def _emitir_arca_wsfe(payload, cfg):
             "vto_cae": ws.Vencimiento,
             "numero": str(cbte_nro),
             "pto_vta": str(pto_vta),
-            "tipo": payload["tipo_comprobante"],
+            "tipo": tipo_emitir,
+            "aviso_tipo": aviso_tipo,
         }
 
     try:
@@ -458,7 +591,7 @@ def emitir_o_encolar(venta_id, payload):
             cur.execute(
                 "UPDATE ventas SET fiscal_estado=?, fiscal_tipo=?, fiscal_cae=?, "
                 "fiscal_numero=?, fiscal_error=? WHERE id=?",
-                ("EMITIDO", payload["tipo_comprobante"], result["cae"], result["numero"], "", venta_id),
+                ("EMITIDO", result.get("tipo", payload["tipo_comprobante"]), result["cae"], result["numero"], "", venta_id),
             )
             conn.commit()
             return True, result

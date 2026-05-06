@@ -18,6 +18,13 @@
 
 ---
 
+## Manuales
+
+- Manual simple de uso diario: `MANUAL_CLIENTE.md`
+- Manual tecnico (instalacion, ARCA y soporte): `MANUAL_TECNICO.md`
+
+---
+
 ## Que hace el sistema
 
 ROD POS esta pensado para correr en comercios chicos/medianos, sin servidor externo:

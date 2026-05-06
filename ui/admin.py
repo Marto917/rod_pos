@@ -744,6 +744,7 @@ def open_admin_panel(user_id, user_name):
         ("Razon social", "empresa_razon_social"),
         ("CUIT empresa", "empresa_cuit"),
         ("IIBB", "empresa_iibb"),
+        ("Inicio de actividades", "empresa_inicio_actividades"),
         ("Domicilio", "empresa_domicilio"),
         ("Condicion IVA", "empresa_condicion_iva"),
         ("Punto de venta", "arca_punto_venta"),
@@ -763,6 +764,24 @@ def open_admin_panel(user_id, user_name):
         ttk.Label(form, text=label + ":").grid(row=idx, column=0, sticky="e", padx=5, pady=4)
         fiscal_vars[key] = tk.StringVar(value=fiscal_cfg.get(key, ""))
         ttk.Entry(form, textvariable=fiscal_vars[key], width=58).grid(row=idx, column=1, sticky="w", padx=5, pady=4)
+        if key in ("arca_cert_path", "arca_key_path", "ticket_logo_path"):
+            def _seleccionar_archivo(target_key=key):
+                if target_key == "arca_cert_path":
+                    tipos = [("Certificado CRT", "*.crt"), ("Todos", "*.*")]
+                    titulo = "Seleccionar certificado CRT"
+                elif target_key == "arca_key_path":
+                    tipos = [("Clave KEY", "*.key"), ("Todos", "*.*")]
+                    titulo = "Seleccionar clave privada KEY"
+                else:
+                    tipos = [("Imagen", "*.png;*.jpg;*.jpeg;*.webp"), ("Todos", "*.*")]
+                    titulo = "Seleccionar logo para ticket"
+                ruta = filedialog.askopenfilename(title=titulo, filetypes=tipos)
+                if ruta:
+                    fiscal_vars[target_key].set(ruta)
+
+            ttk.Button(form, text="Examinar...", command=_seleccionar_archivo).grid(
+                row=idx, column=2, sticky="w", padx=4, pady=4
+            )
     ttk.Label(
         form,
         text="Nota: para emitir ARCA en produccion necesitás cert/key validos y pyafipws instalado.",
