@@ -56,14 +56,14 @@ def open_stock_view(user_id, user_name):
             tree.delete(*tree.get_children())
             if texto_busqueda:
                 cursor.execute("""
-                    SELECT id, codigo_barras, nombre, categoria, cantidad, precio_publico 
+                    SELECT id, codigo_barras, nombre, categoria, cantidad, precio_lista, precio_publico 
                     FROM productos 
                     WHERE nombre LIKE ? OR codigo_barras LIKE ? OR categoria LIKE ?
                     ORDER BY nombre
                 """, (f'%{texto_busqueda}%', f'%{texto_busqueda}%', f'%{texto_busqueda}%'))
             else:
                 cursor.execute("""
-                    SELECT id, codigo_barras, nombre, categoria, cantidad, precio_publico 
+                    SELECT id, codigo_barras, nombre, categoria, cantidad, precio_lista, precio_publico 
                     FROM productos 
                     ORDER BY nombre
                 """)
@@ -77,20 +77,22 @@ def open_stock_view(user_id, user_name):
     btn_buscar.config(command=buscar_productos)
     entry_busqueda.bind('<KeyRelease>', buscar_productos)
 
-    tree = ttk.Treeview(main_frame, columns=('ID', 'Código', 'Nombre', 'Categoría', 'Stock', 'Precio'), show='headings')
+    tree = ttk.Treeview(main_frame, columns=('ID', 'Código', 'Nombre', 'Categoría', 'Stock', 'P. Lista', 'P. Efectivo'), show='headings')
     tree.heading('ID', text='ID')
     tree.heading('Código', text='Código Barras')
     tree.heading('Nombre', text='Nombre')
     tree.heading('Categoría', text='Categoría')
     tree.heading('Stock', text='Stock')
-    tree.heading('Precio', text='Precio Público')
+    tree.heading('P. Lista', text='Precio Lista (Crédito)')
+    tree.heading('P. Efectivo', text='Precio Efectivo/Débito')
 
     tree.column('ID', width=50, anchor='center')
     tree.column('Código', width=120, anchor='center')
     tree.column('Nombre', width=300)
     tree.column('Categoría', width=150)
     tree.column('Stock', width=80, anchor='center')
-    tree.column('Precio', width=100, anchor='e')
+    tree.column('P. Lista', width=120, anchor='e')
+    tree.column('P. Efectivo', width=140, anchor='e')
 
     tree.pack(fill='both', expand=True)
 

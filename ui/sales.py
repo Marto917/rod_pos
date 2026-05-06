@@ -4,6 +4,8 @@ import sqlite3
 from datetime import datetime
 import os
 import sys
+import json
+import base64
 from fpdf import FPDF
 from db_init import get_db_path, get_base_dir
 from fiscal_service import get_fiscal_config, emitir_o_encolar
@@ -77,6 +79,18 @@ def open_sales_panel(user_id, user_name):
         total_var.set(f"{total:.2f}")
         ticket_tree.tag_configure('discount', foreground='red')
 
+    def precio_para_metodo(prod_data, metodo):
+        if metodo == "TARJETA CRÉDITO":
+            return float(prod_data.get("precio_lista", prod_data.get("precio", 0)))
+        return float(prod_data.get("precio_publico", prod_data.get("precio", 0)))
+
+    def recalcular_precios_por_metodo():
+        metodo = metodo_pago_var.get()
+        for p in productos_vendidos:
+            if p.get("id") and p.get("codigo") not in ("105", "ART"):
+                p["precio"] = precio_para_metodo(p, metodo)
+        actualizar_ticket()
+
     def agregar_articulo_manual():
         top = tk.Toplevel(ventana)
         top.title("Articulo manual")
@@ -138,7 +152,10 @@ def open_sales_panel(user_id, user_name):
             codigo_entry.delete(0, tk.END)
             return
 
-        c.execute("SELECT id, nombre, precio_publico, cantidad FROM productos WHERE codigo_barras = ?", (codigo,))
+        c.execute(
+            "SELECT id, nombre, precio_lista, precio_publico, cantidad FROM productos WHERE codigo_barras = ?",
+            (codigo,),
+        )
         prod = c.fetchone()
         if not prod:
             if messagebox.askyesno(
@@ -150,13 +167,19 @@ def open_sales_panel(user_id, user_name):
             else:
                 mostrar_popup("Error", "Producto no encontrado")
             return
-        if prod[3] < 1:
+        if prod[4] < 1:
             mostrar_popup("Sin stock", "No hay stock disponible")
             return
 
         productos_vendidos.append({
-            'id': prod[0], 'codigo': codigo, 'nombre': prod[1], 'precio': prod[2]
+            'id': prod[0],
+            'codigo': codigo,
+            'nombre': prod[1],
+            'precio_lista': float(prod[2]),
+            'precio_publico': float(prod[3]),
+            'precio': float(prod[3]),
         })
+        productos_vendidos[-1]["precio"] = precio_para_metodo(productos_vendidos[-1], metodo_pago_var.get())
         actualizar_ticket()
         codigo_entry.delete(0, tk.END)
 
@@ -213,93 +236,137 @@ def open_sales_panel(user_id, user_name):
         top.wait_window()
         return data
 
-    def _wrap_line(texto, max_chars):
-        t = (texto or "").strip()
-        if len(t) <= max_chars:
-            return [t]
-        partes = []
-        actual = ""
-        for palabra in t.split(" "):
-            nuevo = (actual + " " + palabra).strip()
-            if len(nuevo) <= max_chars:
-                actual = nuevo
-            else:
-                if actual:
-                    partes.append(actual)
-                actual = palabra
-        if actual:
-            partes.append(actual)
-        return partes or [t[:max_chars]]
-
-    def _linea_item(nombre, cantidad, precio, ancho_chars):
-        base = "%s x %s" % (cantidad, nombre)
-        monto = "$%.2f" % precio
-        espacio = max(1, ancho_chars - len(base) - len(monto))
-        if len(base) + len(monto) + 1 <= ancho_chars:
-            return base + (" " * espacio) + monto
-        rec = _wrap_line(base, max(8, ancho_chars - len(monto) - 1))
-        if len(rec) == 1:
-            return rec[0] + " " + monto
-        return rec[0] + "\n" + rec[1][:max(8, ancho_chars - len(monto) - 1)] + " " + monto
-
     def generar_comprobante(venta_id, total, fiscal_info=None):
         cfg = get_fiscal_config()
         comprobantes_dir = os.path.join(get_base_dir(), "comprobantes")
         if not os.path.exists(comprobantes_dir):
             os.makedirs(comprobantes_dir)
+
         fecha = datetime.now().strftime("%d%m%Y")
         nombre_archivo = os.path.join(comprobantes_dir, "%s_%06d.pdf" % (fecha, venta_id))
+
+        # Ticket 58mm con ancho fijo de 32 caracteres.
         ancho_mm = 58
-        try:
-            ancho_mm = int(cfg.get("ticket_ancho_mm") or "58")
-        except Exception:
-            pass
-        ancho_chars = 32 if ancho_mm <= 58 else 42
-        pdf = FPDF(unit="mm", format=(ancho_mm, 220))
+        W = 32
+        usable = 54.0
+        pdf = FPDF(unit="mm", format=(ancho_mm, 330))
+        pdf.set_margins(2, 1, 2)
+        pdf.set_auto_page_break(1, margin=3)
         pdf.add_page()
-        pdf.set_font("Arial", size=8)
-        logo_path = (cfg.get("ticket_logo_path") or "").strip()
-        incluir_logo = (cfg.get("ticket_incluir_logo") or "1") == "1"
-        if incluir_logo and logo_path and os.path.exists(logo_path):
-            try:
-                pdf.image(logo_path, x=3, w=ancho_mm - 6)
-                pdf.ln(14)
-            except Exception:
-                pass
-        pdf.set_font("Arial", "B", 9)
-        pdf.cell(ancho_mm - 4, 5, txt=(cfg.get("empresa_razon_social") or "Comercio"), ln=1, align='C')
-        pdf.set_font("Arial", size=8)
-        if cfg.get("empresa_cuit"):
-            pdf.cell(ancho_mm - 4, 4, txt="CUIT: %s" % cfg.get("empresa_cuit"), ln=1, align='C')
-        pdf.cell(ancho_mm - 4, 4, txt="Ticket #%06d" % venta_id, ln=1, align='C')
-        pdf.cell(ancho_mm - 4, 4, txt=datetime.now().strftime("%d/%m/%Y %H:%M:%S"), ln=1, align='C')
-        pdf.ln(3)
-        subtotal = 0
+        pdf.set_xy(pdf.l_margin, pdf.t_margin)
+
+        def sep(ch="-"):
+            pdf.set_font("Courier", "", 7)
+            pdf.multi_cell(usable, 2.8, ch * W, align="L")
+
+        def row(txt, size=8, bold=False, h=3.2, align="L"):
+            pdf.set_font("Courier", "B" if bold else "", size)
+            pdf.multi_cell(usable, h, txt, align=align)
+
+        def item_filas(cant, nombre, precio):
+            wq, wp = 4, 10
+            wn = W - wq - wp - 2
+            q = ("%s" % cant)[:wq].rjust(wq)
+            pr = ("$%.2f" % precio)[:wp].rjust(wp)
+            nom = (nombre or "").strip() or "-"
+            filas = ["%s %s %s" % (q, nom[:wn].ljust(wn), pr)]
+            resto = nom[wn:]
+            while resto:
+                trozo = resto[: W - wq - 1]
+                resto = resto[W - wq - 1 :]
+                filas.append((" " * (wq + 1)) + trozo)
+            return filas
+
+        razon = (cfg.get("empresa_razon_social") or "COMERCIO").strip().upper()
+        cuit = (cfg.get("empresa_cuit") or "-").strip()
+        iibb = (cfg.get("empresa_iibb") or "-").strip()
+        pto = (fiscal_info or {}).get("pto_vta") or (cfg.get("arca_punto_venta") or "1")
+        nro = (fiscal_info or {}).get("numero") or ("%06d" % venta_id)
+        tipo = ((fiscal_info or {}).get("tipo") or "B").upper()
+
+        row(razon, size=9, bold=True, h=3.8, align="C")
+        row("CUIT: %s" % cuit, align="C")
+        row("IIBB: %s" % iibb, align="C")
+        sep("=")
+        row("FACTURA %s" % tipo, bold=True, align="C")
+        row("Pto.Vta: %s   Nro: %s" % (pto, nro))
+        row(datetime.now().strftime("%d/%m/%Y %H:%M"))
+        sep("-")
+
+        row("Cant Producto            Importe", bold=True, size=8)
+        sep("-")
+
+        subtotal = 0.0
         for p in productos_vendidos:
-            if p['codigo'] != '105':
-                linea = _linea_item(p['nombre'], 1, p['precio'], ancho_chars)
-                pdf.multi_cell(ancho_mm - 4, 4, txt=linea, align='L')
-                subtotal += p['precio']
-            else:
-                pdf.multi_cell(ancho_mm - 4, 4, txt=p['nombre'], align='L')
-        pdf.ln(2)
-        pdf.set_font("Arial", 'B', size=10)
-        pdf.cell(ancho_mm - 4, 5, txt="SUBTOTAL: $%.2f" % subtotal, ln=1, align='R')
-        if descuento_activo.get():
-            descuento = round(subtotal * 0.10, 2)
-            pdf.cell(ancho_mm - 4, 5, txt="DESCUENTO: -$%.2f" % descuento, ln=1, align='R')
-        pdf.cell(ancho_mm - 4, 6, txt="TOTAL: $%.2f" % float(total_var.get()), ln=1, align='R')
-        pdf.ln(2)
-        pdf.set_font("Arial", size=8)
-        pdf.cell(ancho_mm - 4, 4, txt="Pago: %s" % metodo_pago_var.get(), ln=1, align='L')
-        if fiscal_info:
-            pdf.cell(ancho_mm - 4, 4, txt="Fiscal: %s" % fiscal_info.get("estado", ""), ln=1, align='L')
-            if fiscal_info.get("cae"):
-                pdf.cell(ancho_mm - 4, 4, txt="CAE: %s" % fiscal_info["cae"], ln=1, align='L')
+            if p["codigo"] == "105":
+                row((p["nombre"] or "")[:W], bold=True)
+                continue
+            precio = float(p["precio"])
+            subtotal += precio
+            for ln in item_filas(1, p["nombre"], precio):
+                row(ln)
+
+        desc_monto = round(subtotal * 0.10, 2) if descuento_activo.get() else 0.0
+        total_num = float(total_var.get())
+        neto = round(total_num / 1.21, 2)
+        iva_amt = round(total_num - neto, 2)
+        sep("-")
+        row("Base 21%%: $%.2f" % neto)
+        row("IVA 21%% : $%.2f" % iva_amt)
+        if desc_monto > 0:
+            row("Desc.    : -$%.2f" % desc_monto)
+        row("TOTAL    : $%.2f" % total_num, bold=True, size=10, h=4.2)
+        sep("=")
+        row("Pago: %s" % metodo_pago_var.get())
+
+        cae = (fiscal_info or {}).get("cae", "")
+        vto_cae = (fiscal_info or {}).get("vto_cae", "")
+        if cae:
+            row("CAE: %s" % cae)
+            if vto_cae:
+                row("Vto CAE: %s" % vto_cae)
+
         pie = (cfg.get("ticket_pie_texto") or "").strip()
         if pie:
-            pdf.ln(2)
-            pdf.multi_cell(ancho_mm - 4, 4, txt=pie, align='C')
+            sep("-")
+            row(pie, size=7, align="C")
+
+        # QR AFIP al final (si hay datos fiscales completos).
+        if cae and (fiscal_info or {}).get("numero") and (fiscal_info or {}).get("pto_vta"):
+            try:
+                import qrcode
+
+                qr_data = {
+                    "ver": 1,
+                    "fecha": datetime.now().strftime("%Y-%m-%d"),
+                    "cuit": int("".join(ch for ch in cuit if ch.isdigit()) or "0"),
+                    "ptoVta": int((fiscal_info or {}).get("pto_vta")),
+                    "tipoCmp": 6 if tipo == "B" else 1,
+                    "nroCmp": int((fiscal_info or {}).get("numero")),
+                    "importe": round(total_num, 2),
+                    "moneda": "PES",
+                    "ctz": 1,
+                    "tipoDocRec": 99 if tipo == "B" else 80,
+                    "nroDocRec": 0,
+                    "tipoCodAut": "E",
+                    "codAut": int(cae),
+                }
+                qr_json = json.dumps(qr_data, separators=(",", ":"))
+                qr_b64 = base64.b64encode(qr_json.encode("utf-8")).decode("ascii")
+                qr_url = "https://www.afip.gob.ar/fe/qr/?p=%s" % qr_b64
+                img = qrcode.make(qr_url)
+                qr_path = os.path.join(comprobantes_dir, "qr_%s_%06d.png" % (fecha, venta_id))
+                img.save(qr_path)
+                pdf.ln(1.5)
+                size_qr = 22
+                x_qr = (ancho_mm - size_qr) / 2.0
+                pdf.image(qr_path, x=x_qr, w=size_qr, h=size_qr)
+            except Exception:
+                # Si falta la librería qrcode o falla la imagen, no frena la venta.
+                pass
+
+        # Solo dos saltos finales para corte manual.
+        pdf.ln(2)
         pdf.output(nombre_archivo)
         return nombre_archivo
 
@@ -354,24 +421,48 @@ def open_sales_panel(user_id, user_name):
                     )
                     conn.commit()
                     ok_fiscal, res_fiscal = emitir_o_encolar(venta_id, payload)
+                    forzar_no_imprimir = False
                     if ok_fiscal:
-                        fiscal_info = {"estado": "EMITIDO", "cae": res_fiscal.get("cae", "")}
+                        fiscal_info = {
+                            "estado": "EMITIDO",
+                            "cae": res_fiscal.get("cae", ""),
+                            "vto_cae": res_fiscal.get("vto_cae", ""),
+                            "tipo": data_tipo.get("tipo", ""),
+                            "numero": res_fiscal.get("numero", ""),
+                            "pto_vta": res_fiscal.get("pto_vta", ""),
+                        }
                         mostrar_popup("Fiscal", "Comprobante fiscal emitido OK.")
                     else:
-                        fiscal_info = {"estado": "PENDIENTE"}
-                        mostrar_popup("Fiscal", "No se pudo emitir ahora. Quedo en pendientes ARCA.")
+                        err_fiscal = (res_fiscal or {}).get("error", "")
+                        fiscal_info = {
+                            "estado": "PENDIENTE",
+                            "tipo": data_tipo.get("tipo", ""),
+                        }
+                        if "Error de Autenticación WSAA" in err_fiscal:
+                            forzar_no_imprimir = True
+                            mostrar_popup(
+                                "Fiscal",
+                                "Error de Autenticación WSAA.\n"
+                                "No se imprimirá ticket automático en este intento.\n"
+                                "Revisá debug_afip.txt y configuración ARCA.",
+                            )
+                        else:
+                            mostrar_popup("Fiscal", "No se pudo emitir ahora. Quedo en pendientes ARCA.")
                 else:
                     c.execute(
                         "UPDATE ventas SET fiscal_solicitado=0, fiscal_estado='NO_SOLICITADO' WHERE id=?",
                         (venta_id,),
                     )
                     conn.commit()
+                    forzar_no_imprimir = False
             else:
                 c.execute(
                     "UPDATE ventas SET fiscal_solicitado=0, fiscal_estado='NO_SOLICITADO' WHERE id=?",
                     (venta_id,),
                 )
                 conn.commit()
+                forzar_no_imprimir = False
+            cfg = get_fiscal_config()
             try:
                 pdf_path = generar_comprobante(venta_id, total, fiscal_info=fiscal_info)
             except Exception as e:
@@ -383,6 +474,8 @@ def open_sales_panel(user_id, user_name):
             else:
                 mostrar_popup("Éxito", "Venta registrada\nTotal: $%s\nMétodo: %s" % (("%.2f" % total), metodo_pago))
                 auto_print = (cfg.get("ticket_auto_imprimir") or "0") == "1"
+                if forzar_no_imprimir:
+                    auto_print = False
                 desea_imprimir = auto_print or messagebox.askyesno(
                     "Impresion",
                     "Desea imprimir ticket ahora?",
@@ -470,6 +563,7 @@ def open_sales_panel(user_id, user_name):
                                 values=["EFECTIVO", "TARJETA DÉBITO", "TARJETA CRÉDITO", "MERCADOPAGO"],
                                 state="readonly", width=20)
     metodo_pago.grid(row=0, column=3, sticky='w')
+    metodo_pago.bind("<<ComboboxSelected>>", lambda e: recalcular_precios_por_metodo())
     boton_frame = ttk.Frame(resumen_frame)
     boton_frame.grid(row=0, column=4, rowspan=3, padx=20)
     tk.Button(boton_frame, text="PAGAR", bg="green", fg="white", font=('Segoe UI', 14, 'bold'), width=15, height=2, command=finalizar_venta).pack(pady=5)

@@ -2,8 +2,6 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import sqlite3
 from datetime import datetime, timedelta
-import matplotlib.pyplot as plt
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import os
 import shutil
 import json
@@ -31,7 +29,11 @@ def open_admin_panel(user_id, user_name):
         try:
             conn.commit()
             conn.close()
-            plt.close('all')
+            try:
+                import matplotlib.pyplot as plt
+                plt.close('all')
+            except Exception:
+                pass
             ventana.quit()
             ventana.destroy()
             os._exit(0)
@@ -222,20 +224,22 @@ def open_admin_panel(user_id, user_name):
     notebook.add(tab_productos, text='📦 Productos')
 
     # Treeview para productos
-    tree_productos = ttk.Treeview(tab_productos, columns=('ID', 'Código', 'Nombre', 'Categoría', 'Stock', 'Precio'), show='headings')
+    tree_productos = ttk.Treeview(tab_productos, columns=('ID', 'Código', 'Nombre', 'Categoría', 'Stock', 'P. Lista', 'P. Efectivo'), show='headings')
     tree_productos.heading('ID', text='ID')
     tree_productos.heading('Código', text='Código Barras')
     tree_productos.heading('Nombre', text='Nombre')
     tree_productos.heading('Categoría', text='Categoría')
     tree_productos.heading('Stock', text='Stock')
-    tree_productos.heading('Precio', text='Precio Público')
+    tree_productos.heading('P. Lista', text='Precio Lista (Crédito)')
+    tree_productos.heading('P. Efectivo', text='Precio Efectivo/Débito')
 
     tree_productos.column('ID', width=50, anchor='center')
     tree_productos.column('Código', width=120, anchor='center')
     tree_productos.column('Nombre', width=250)
     tree_productos.column('Categoría', width=150)
     tree_productos.column('Stock', width=80, anchor='center')
-    tree_productos.column('Precio', width=100, anchor='e')
+    tree_productos.column('P. Lista', width=120, anchor='e')
+    tree_productos.column('P. Efectivo', width=140, anchor='e')
 
     tree_productos.pack(fill='both', expand=True, padx=10, pady=10)
 
@@ -253,11 +257,14 @@ def open_admin_panel(user_id, user_name):
             tree_productos.delete(*tree_productos.get_children())
             cursor.execute("""
                 SELECT id, codigo_barras, nombre, categoria, cantidad, precio_publico 
+                , precio_lista
                 FROM productos 
                 ORDER BY nombre
             """)
             for producto in cursor.fetchall():
-                tree_productos.insert('', 'end', values=producto)
+                tree_productos.insert('', 'end', values=(
+                    producto[0], producto[1], producto[2], producto[3], producto[4], producto[6], producto[5]
+                ))
         except sqlite3.Error as e:
             messagebox.showerror("Error", f"No se pudieron cargar productos:\n{str(e)}")
 
@@ -286,20 +293,71 @@ def open_admin_panel(user_id, user_name):
         def guardar_cambios():
             try:
                 cantidad = int(nuevo_stock.get())
+                if cantidad < 0:
+                    raise ValueError
                 cursor.execute("UPDATE productos SET cantidad = ? WHERE id = ?", (cantidad, producto_id))
                 conn.commit()
                 messagebox.showinfo("Éxito", "Stock actualizado correctamente")
                 edicion.destroy()
                 cargar_productos()
             except ValueError:
-                messagebox.showerror("Error", "Ingrese un valor numérico válido")
+                messagebox.showerror("Error", "Ingrese un stock numérico válido (>= 0)")
             except Exception as e:
                 messagebox.showerror("Error", f"No se pudo actualizar:\n{str(e)}")
 
         ttk.Button(edicion, text="Guardar", command=guardar_cambios).pack(pady=10)
 
+    def editar_precios():
+        seleccionado = tree_productos.selection()
+        if not seleccionado:
+            messagebox.showwarning("Advertencia", "Seleccione un producto")
+            return
+
+        vals = tree_productos.item(seleccionado[0], 'values')
+        producto_id = vals[0]
+        nombre = vals[2]
+        precio_lista_actual = vals[5]
+        precio_efectivo_actual = vals[6]
+
+        edicion = tk.Toplevel(ventana)
+        edicion.title(f"Editar precios - {nombre}")
+        edicion.resizable(False, False)
+
+        ttk.Label(edicion, text=f"Producto: {nombre}").grid(row=0, column=0, columnspan=2, padx=8, pady=8, sticky='w')
+        ttk.Label(edicion, text="Precio lista (Crédito):").grid(row=1, column=0, padx=8, pady=5, sticky='e')
+        entry_lista = ttk.Entry(edicion, width=18)
+        entry_lista.grid(row=1, column=1, padx=8, pady=5)
+        entry_lista.insert(0, str(precio_lista_actual))
+
+        ttk.Label(edicion, text="Precio efectivo/débito:").grid(row=2, column=0, padx=8, pady=5, sticky='e')
+        entry_efectivo = ttk.Entry(edicion, width=18)
+        entry_efectivo.grid(row=2, column=1, padx=8, pady=5)
+        entry_efectivo.insert(0, str(precio_efectivo_actual))
+
+        def guardar_precios():
+            try:
+                precio_lista = float(entry_lista.get().replace(",", "."))
+                precio_efectivo = float(entry_efectivo.get().replace(",", "."))
+                if precio_lista < 0 or precio_efectivo < 0:
+                    raise ValueError
+                cursor.execute(
+                    "UPDATE productos SET precio_lista = ?, precio_publico = ? WHERE id = ?",
+                    (precio_lista, precio_efectivo, producto_id),
+                )
+                conn.commit()
+                messagebox.showinfo("Éxito", "Precios actualizados correctamente")
+                edicion.destroy()
+                cargar_productos()
+            except ValueError:
+                messagebox.showerror("Error", "Ingrese valores numéricos válidos (>= 0)")
+            except Exception as e:
+                messagebox.showerror("Error", f"No se pudieron actualizar precios:\n{str(e)}")
+
+        ttk.Button(edicion, text="Guardar", command=guardar_precios).grid(row=3, column=1, padx=8, pady=10, sticky='e')
+
     ttk.Button(btn_frame_productos, text="Actualizar", command=cargar_productos).pack(side='left', padx=5)
     ttk.Button(btn_frame_productos, text="Editar Stock", command=editar_stock).pack(side='left', padx=5)
+    ttk.Button(btn_frame_productos, text="Editar Precios", command=editar_precios).pack(side='left', padx=5)
 
     # ----------------------------
     # PESTAÑA DESCUENTOS
@@ -426,52 +484,95 @@ def open_admin_panel(user_id, user_name):
     tab_reportes = ttk.Frame(notebook)
     notebook.add(tab_reportes, text='📊 Reportes')
 
+    # Controles de fecha
+    controles_frame = ttk.Frame(tab_reportes)
+    controles_frame.pack(pady=10, fill='x')
+
+    ttk.Label(controles_frame, text="Desde:").pack(side='left')
+    fecha_inicio = ttk.Entry(controles_frame, width=10)
+    fecha_inicio.pack(side='left', padx=5)
+    fecha_inicio.insert(0, (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d'))
+
+    ttk.Label(controles_frame, text="Hasta:").pack(side='left')
+    fecha_fin = ttk.Entry(controles_frame, width=10)
+    fecha_fin.pack(side='left', padx=5)
+    fecha_fin.insert(0, datetime.now().strftime('%Y-%m-%d'))
+
+    reportes_content = ttk.Frame(tab_reportes)
+    reportes_content.pack(fill='both', expand=True, padx=10, pady=5)
+
     def actualizar_reporte():
+        """Reportes sin matplotlib/numpy: tabla + barras en Canvas (funciona en cualquier PC)."""
+        for w in reportes_content.winfo_children():
+            w.destroy()
         try:
-            if hasattr(tab_reportes, 'canvas'):
-                tab_reportes.canvas.get_tk_widget().destroy()
-            fig, ax = plt.subplots(figsize=(8, 4))
             cursor.execute("""
                 SELECT date(fecha) as dia, SUM(total) as total
-                FROM ventas 
+                FROM ventas
                 WHERE date(fecha) BETWEEN ? AND ?
                 GROUP BY date(fecha)
                 ORDER BY date(fecha)
             """, (fecha_inicio.get(), fecha_fin.get()))
             datos = cursor.fetchall()
-            if datos:
-                fechas = [d[0] for d in datos]
-                totales = [d[1] for d in datos]
-                ax.bar(fechas, totales, color='#4CAF50')
-                ax.set_title('Ventas por Día')
-                ax.set_xlabel('Fecha')
-                ax.set_ylabel('Total ($)')
-                plt.xticks(rotation=45)
-                fig.tight_layout()
-                tab_reportes.canvas = FigureCanvasTkAgg(fig, master=tab_reportes)
-                tab_reportes.canvas.draw()
-                tab_reportes.canvas.get_tk_widget().pack(fill='both', expand=True)
-            else:
-                messagebox.showinfo("Información", "No hay datos de ventas en el rango seleccionado")
         except sqlite3.Error as e:
-            messagebox.showerror("Error BD", "Error en consulta:\n%s" % str(e))
-        except Exception as e:
-            messagebox.showerror("Error", "Error al generar reporte:\n%s" % str(e))
+            messagebox.showerror("Error BD", "Error en consulta:\n%s" % str(e), parent=ventana)
+            return
+        if not datos:
+            messagebox.showinfo("Información", "No hay datos de ventas en el rango seleccionado", parent=ventana)
+            return
 
-    # Controles de fecha
-    controles_frame = ttk.Frame(tab_reportes)
-    controles_frame.pack(pady=10, fill='x')
-    
-    ttk.Label(controles_frame, text="Desde:").pack(side='left')
-    fecha_inicio = ttk.Entry(controles_frame, width=10)
-    fecha_inicio.pack(side='left', padx=5)
-    fecha_inicio.insert(0, (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d'))
-    
-    ttk.Label(controles_frame, text="Hasta:").pack(side='left')
-    fecha_fin = ttk.Entry(controles_frame, width=10)
-    fecha_fin.pack(side='left', padx=5)
-    fecha_fin.insert(0, datetime.now().strftime('%Y-%m-%d'))
-    
+        main_fr = ttk.Frame(reportes_content)
+        main_fr.pack(fill='both', expand=True)
+
+        ttk.Label(main_fr, text="Ventas por día (sin dependencias externas)", font=('Arial', 10, 'bold')).pack(anchor='w', pady=(0, 5))
+
+        split = ttk.Frame(main_fr)
+        split.pack(fill='both', expand=True)
+
+        tree_fr = ttk.Frame(split)
+        tree_fr.pack(side='left', fill='y', padx=(0, 10))
+        cols = ('Fecha', 'Total')
+        rep_tree = ttk.Treeview(tree_fr, columns=cols, show='headings', height=min(20, len(datos) + 2))
+        rep_tree.heading('Fecha', text='Fecha')
+        rep_tree.heading('Total', text='Total ($)')
+        rep_tree.column('Fecha', width=110)
+        rep_tree.column('Total', width=100, anchor='e')
+        scr = ttk.Scrollbar(tree_fr, orient='vertical', command=rep_tree.yview)
+        rep_tree.configure(yscrollcommand=scr.set)
+        rep_tree.pack(side='left', fill='y')
+        scr.pack(side='right', fill='y')
+
+        totales = []
+        for dia, tot in datos:
+            t = float(tot or 0)
+            totales.append(t)
+            rep_tree.insert('', 'end', values=(dia, "%.2f" % t))
+
+        cv_fr = ttk.Frame(split)
+        cv_fr.pack(side='left', fill='both', expand=True)
+        cv_h, cv_w = 260, 520
+        cvs = tk.Canvas(cv_fr, width=cv_w, height=cv_h, bg='white', highlightthickness=1, highlightbackground='#ccc')
+        cvs.pack(fill='both', expand=True)
+
+        maxv = max(totales) if totales else 1.0
+        n = len(datos)
+        margin_l, margin_b, margin_t = 40, 36, 12
+        plot_w = cv_w - margin_l - 10
+        plot_h = cv_h - margin_b - margin_t
+        bar_gap = 4
+        bar_w = max(6, int((plot_w - (n - 1) * bar_gap) / n)) if n else 6
+
+        cvs.create_text(cv_w // 2, 8, text='Total por dia ($)', font=('Arial', 9, 'bold'))
+        for i, (dia, tot) in enumerate(datos):
+            t = float(tot or 0)
+            h = int((t / maxv) * (plot_h - 5)) if maxv > 0 else 0
+            x0 = margin_l + i * (bar_w + bar_gap)
+            y0 = margin_t + plot_h - h
+            y1 = margin_t + plot_h
+            cvs.create_rectangle(x0, y0, x0 + bar_w, y1, fill='#4CAF50', outline='')
+            etiqueta = str(dia)[-5:] if len(str(dia)) >= 5 else str(dia)
+            cvs.create_text(x0 + bar_w / 2, y1 + 12, text=etiqueta, font=('Arial', 7))
+
     ttk.Button(controles_frame, text="Generar Reporte", command=actualizar_reporte).pack(side='left', padx=10)
 
     # ----------------------------

@@ -1,16 +1,41 @@
 # -*- mode: python ; coding: utf-8 -*-
+# Empaqueta PyAfipWs y datos dentro del .exe para que funcione sin instalar Python en la PC cliente.
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
+try:
+    _pyafip_datas = collect_data_files("pyafipws")
+except Exception:
+    _pyafip_datas = []
+
+try:
+    _pyafip_hidden = collect_submodules("pyafipws")
+except Exception:
+    _pyafip_hidden = []
+
+# Reportes ya no usan matplotlib; excluir reduce tamaño y evita errores de numpy en otras PCs.
+_excludes = ["matplotlib", "mpl_toolkits"]
 
 a = Analysis(
-    ['main.py'],
+    ["main.py"],
     pathex=[],
     binaries=[],
-    datas=[('ui', 'ui'), ('db', 'db')],
-    hiddenimports=[],
+    datas=[("ui", "ui"), ("db", "db")] + _pyafip_datas,
+    hiddenimports=_pyafip_hidden
+    + [
+        "pyafipws.wsfev1",
+        "pyafipws.wsaa",
+        "pyafipws.utils",
+        "cryptography",
+        "certifi",
+        "pysimplesoap",
+        "httplib2",
+        "dbf",
+        "fpdf",
+    ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=_excludes,
     noarchive=False,
     optimize=0,
 )
@@ -22,7 +47,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='RodPOS',
+    name="RodPOS",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -35,5 +60,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=['ui\\images\\logo.ico'],
+    icon=["ui\\images\\logo.ico"],
 )
