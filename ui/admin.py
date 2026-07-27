@@ -756,7 +756,9 @@ def open_admin_panel(user_id, user_name):
         ("Pie ticket", "ticket_pie_texto"),
         ("Ancho ticket mm", "ticket_ancho_mm"),
         ("Incluir logo (1/0)", "ticket_incluir_logo"),
-        ("Auto imprimir ticket (1/0)", "ticket_auto_imprimir"),
+        ("Auto imprimir factura (1/0)", "ticket_auto_imprimir"),
+        ("Emitir Factura C automático (1/0)", "fiscal_auto_emitir"),
+        ("Tipo fiscal default (C/B/A)", "fiscal_tipo_default"),
     ]
     form = ttk.Frame(tab_fiscal, padding=12)
     form.pack(fill="both", expand=True)
@@ -818,6 +820,13 @@ def open_admin_panel(user_id, user_name):
         auto_print = data.get("ticket_auto_imprimir", "")
         if auto_print not in ("0", "1"):
             errores.append("Auto imprimir ticket debe ser 1 o 0.")
+        auto_fiscal = data.get("fiscal_auto_emitir", "1")
+        if auto_fiscal not in ("0", "1"):
+            errores.append("Emitir Factura C automático debe ser 1 o 0.")
+        tipo_def = (data.get("fiscal_tipo_default") or "C").upper()
+        if tipo_def not in ("A", "B", "C"):
+            errores.append("Tipo fiscal default debe ser A, B o C.")
+        data["fiscal_tipo_default"] = tipo_def
         if errores:
             messagebox.showerror("ARCA/Ticket", "\n".join(errores), parent=ventana)
             return
@@ -829,8 +838,10 @@ def open_admin_panel(user_id, user_name):
             "Impresion de ticket:\n"
             "1) En Windows, configurá la Xprinter como impresora predeterminada.\n"
             "2) El sistema imprime enviando el PDF al comando print del sistema.\n"
-            "3) Si querés imprimir sin preguntar en cada venta, poné 'Auto imprimir ticket' en 1.\n"
-            "4) Recomendado: ancho ticket 58 mm."
+            "3) Auto imprimir ticket = 1 (recomendado en local lleno).\n"
+            "4) Emitir Factura C automático = 1: cobra sin preguntar tipo fiscal.\n"
+            "5) Datos del cliente (F3) son opcionales; si los carga, salen en el ticket.\n"
+            "6) Ancho ticket 58 mm."
         )
         messagebox.showinfo("Ayuda impresion", msg, parent=ventana)
 
@@ -840,6 +851,137 @@ def open_admin_panel(user_id, user_name):
     ttk.Button(form, text="Ayuda impresion", command=ayuda_impresion).grid(
         row=len(campos) + 2, column=1, sticky="w", pady=4
     )
+
+    # ----------------------------
+    # PESTAÑA RED / LAN
+    # ----------------------------
+    tab_lan = ttk.Frame(notebook)
+    notebook.add(tab_lan, text='🌐 Red LAN')
+
+    from pos_config import load_config, save_config, server_base_url
+    from lan_server import is_lan_server_running, start_lan_server
+    from services.stock_ops import healthcheck, StockError as _StockError
+
+    cfg_lan = load_config()
+    lan_sucursal = tk.StringVar(value=cfg_lan.get("sucursal_nombre", ""))
+    lan_terminal = tk.StringVar(value=cfg_lan.get("terminal_id", "CAJA-1"))
+    lan_modo = tk.StringVar(value=cfg_lan.get("modo_red", "local"))
+    lan_host = tk.StringVar(value=cfg_lan.get("servidor_host", "127.0.0.1"))
+    lan_puerto = tk.StringVar(value=str(cfg_lan.get("servidor_puerto", 8765)))
+    lan_auto = tk.BooleanVar(value=bool(cfg_lan.get("auto_iniciar_servidor", True)))
+    lan_estado = tk.StringVar(value="")
+
+    ttk.Label(
+        tab_lan,
+        text="Conectá dos o más PCs en la misma red WiFi/cable para compartir stock y ventas.\n"
+             "PC principal = modo Servidor. Otras cajas = modo Cliente (IP de la principal).",
+        wraplength=700,
+        font=("Arial", 10),
+    ).pack(anchor="w", padx=16, pady=(16, 8))
+
+    form_lan = ttk.Frame(tab_lan)
+    form_lan.pack(anchor="w", padx=16, pady=8)
+
+    ttk.Label(form_lan, text="Sucursal:").grid(row=0, column=0, sticky="e", pady=4)
+    ttk.Entry(form_lan, textvariable=lan_sucursal, width=40).grid(row=0, column=1, sticky="w", pady=4)
+
+    ttk.Label(form_lan, text="Terminal / caja:").grid(row=1, column=0, sticky="e", pady=4)
+    ttk.Entry(form_lan, textvariable=lan_terminal, width=20).grid(row=1, column=1, sticky="w", pady=4)
+
+    ttk.Label(form_lan, text="Modo red:").grid(row=2, column=0, sticky="e", pady=4)
+    ttk.Combobox(
+        form_lan,
+        textvariable=lan_modo,
+        values=("local", "servidor", "cliente"),
+        state="readonly",
+        width=18,
+    ).grid(row=2, column=1, sticky="w", pady=4)
+
+    ttk.Label(form_lan, text="IP del servidor:").grid(row=3, column=0, sticky="e", pady=4)
+    ttk.Entry(form_lan, textvariable=lan_host, width=20).grid(row=3, column=1, sticky="w", pady=4)
+
+    ttk.Label(form_lan, text="Puerto:").grid(row=4, column=0, sticky="e", pady=4)
+    ttk.Entry(form_lan, textvariable=lan_puerto, width=10).grid(row=4, column=1, sticky="w", pady=4)
+
+    ttk.Checkbutton(
+        form_lan,
+        text="Auto-iniciar servidor al abrir ROD POS (solo modo servidor)",
+        variable=lan_auto,
+    ).grid(row=5, column=0, columnspan=2, sticky="w", pady=8)
+
+    ttk.Label(tab_lan, textvariable=lan_estado, font=("Arial", 10, "italic")).pack(anchor="w", padx=16, pady=6)
+
+    def guardar_lan():
+        try:
+            puerto = int(lan_puerto.get())
+        except ValueError:
+            messagebox.showerror("Red LAN", "Puerto inválido", parent=ventana)
+            return
+        save_config(
+            {
+                "sucursal_nombre": lan_sucursal.get().strip() or "Sucursal principal",
+                "terminal_id": lan_terminal.get().strip() or "CAJA-1",
+                "modo_red": lan_modo.get(),
+                "servidor_host": lan_host.get().strip() or "127.0.0.1",
+                "servidor_puerto": puerto,
+                "auto_iniciar_servidor": bool(lan_auto.get()),
+            }
+        )
+        messagebox.showinfo(
+            "Red LAN",
+            "Configuración guardada.\nReiniciá ROD POS para aplicar el modo de red.",
+            parent=ventana,
+        )
+        actualizar_estado_lan()
+
+    def probar_lan():
+        try:
+            if lan_modo.get() == "cliente":
+                save_config(
+                    {
+                        "modo_red": "cliente",
+                        "servidor_host": lan_host.get().strip(),
+                        "servidor_puerto": int(lan_puerto.get()),
+                    }
+                )
+            data = healthcheck()
+            lan_estado.set("Conexión OK: %s" % data)
+            messagebox.showinfo("Red LAN", "Conexión OK.\n%s" % data, parent=ventana)
+        except Exception as e:
+            lan_estado.set("Error: %s" % e)
+            messagebox.showerror("Red LAN", "No se pudo conectar:\n%s" % e, parent=ventana)
+
+    def iniciar_servidor_ahora():
+        try:
+            host, port = start_lan_server()
+            lan_estado.set("Servidor activo en 0.0.0.0:%s (otras PCs usan la IP de esta máquina)" % port)
+            messagebox.showinfo(
+                "Servidor LAN",
+                "Servidor iniciado en puerto %s.\nEn la otra PC poné modo Cliente e IP de esta máquina."
+                % port,
+                parent=ventana,
+            )
+        except Exception as e:
+            messagebox.showerror("Servidor LAN", str(e), parent=ventana)
+
+    def actualizar_estado_lan():
+        cfg_now = load_config()
+        running = is_lan_server_running()
+        lan_estado.set(
+            "Modo actual: %s | URL: %s | Servidor en esta PC: %s"
+            % (
+                cfg_now.get("modo_red"),
+                server_base_url(cfg_now),
+                "SÍ" if running else "NO",
+            )
+        )
+
+    btns_lan = ttk.Frame(tab_lan)
+    btns_lan.pack(anchor="w", padx=16, pady=10)
+    ttk.Button(btns_lan, text="Guardar configuración", command=guardar_lan).pack(side="left", padx=4)
+    ttk.Button(btns_lan, text="Probar conexión", command=probar_lan).pack(side="left", padx=4)
+    ttk.Button(btns_lan, text="Iniciar servidor ahora", command=iniciar_servidor_ahora).pack(side="left", padx=4)
+    actualizar_estado_lan()
 
     # ----------------------------
     # PESTAÑA LICENCIA

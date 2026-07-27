@@ -59,7 +59,7 @@ def open_vendor_panel(user_id, user_name):
         ("TICKET DE VENTA", lambda: abrir_panel("Ticket de venta", lambda: open_sales_panel(user_id, user_name)), btn_colors['ticket']),
         ("CONSULTAR STOCK", lambda: abrir_panel("Consultar stock", lambda: open_stock_view(user_id, user_name)), btn_colors['stock']),
         ("RECEPCIÓN DE PRODUCTOS", lambda: abrir_panel("Recepción", lambda: open_recepcion_panel(user_id, user_name)), btn_colors['recepcion']),
-        ("ARQUEO DE CAJA", lambda: abrir_panel("Arqueo de caja", lambda: open_arqueo_panel(user_id, user_name)), btn_colors['arqueo']),
+        ("CIERRE DE CAJA", lambda: abrir_panel("Cierre de caja", lambda: open_arqueo_panel(user_id, user_name)), btn_colors['arqueo']),
         ("PENDIENTES ARCA", lambda: abrir_panel("Pendientes ARCA", lambda: open_arca_pendientes_panel(user_id, user_name)), btn_colors['pendientes']),
         ("CERRAR SESIÓN", ventana.destroy, btn_colors['logout'])
     ]

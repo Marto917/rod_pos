@@ -27,15 +27,18 @@
 
 ## Que hace el sistema
 
-ROD POS esta pensado para correr en comercios chicos/medianos, sin servidor externo:
+ROD POS esta pensado para correr en comercios chicos/medianos:
 
 - Venta por codigo de barras y carga manual de articulos.
-- Control de stock automatico.
-- Arqueo de caja y reportes.
+- Control de stock automatico (con historial de movimientos).
+- Cierre de caja profesional con Excel y PDF.
+- Multi-caja por LAN (una PC servidor + cajas cliente compartiendo stock).
 - Gestion de usuarios (vendedor/admin).
 - Licencia por HWID.
 - Emision fiscal ARCA con cola de pendientes y reintento.
 - Generacion de ticket PDF para impresora termica 58mm.
+
+Guia rapida LAN y cierre: `MANUAL_LAN_Y_CIERRE.md`
 
 ---
 

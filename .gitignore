@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+*.pyo
+db/*.db
+db/*.db-shm
+db/*.db-wal
+comprobantes/
+reportes/
+debug_ticket.txt
+licencia.dat
+licencia_usada.hash
+*.log
+.DS_Store
+Thumbs.db

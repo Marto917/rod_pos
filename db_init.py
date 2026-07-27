@@ -89,6 +89,47 @@ def init_db():
     ensure_column(c, "ventas", "fiscal_cae", "TEXT")
     ensure_column(c, "ventas", "fiscal_numero", "TEXT")
     ensure_column(c, "ventas", "fiscal_error", "TEXT")
+    ensure_column(c, "ventas", "terminal_id", "TEXT")
+    ensure_column(c, "ventas", "arqueo_id", "INTEGER")
+
+    # Cierre de caja profesional (migraciones)
+    ensure_column(c, "arqueos_caja", "efectivo_contado", "REAL DEFAULT 0")
+    ensure_column(c, "arqueos_caja", "fondo_inicial", "REAL DEFAULT 0")
+    ensure_column(c, "arqueos_caja", "terminal_id", "TEXT")
+    ensure_column(c, "arqueos_caja", "sucursal", "TEXT")
+    ensure_column(c, "arqueos_caja", "cantidad_tickets", "INTEGER DEFAULT 0")
+    ensure_column(c, "arqueos_caja", "fecha_desde", "TEXT")
+    ensure_column(c, "arqueos_caja", "fecha_hasta", "TEXT")
+    ensure_column(c, "arqueos_caja", "archivo_excel", "TEXT")
+    ensure_column(c, "arqueos_caja", "archivo_pdf", "TEXT")
+
+    # Historial de movimientos de stock (auditoría multi-caja)
+    c.execute('''CREATE TABLE IF NOT EXISTS stock_movimientos (
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               producto_id INTEGER NOT NULL,
+               delta INTEGER NOT NULL,
+               stock_antes INTEGER,
+               stock_despues INTEGER,
+               motivo TEXT NOT NULL,
+               referencia TEXT,
+               usuario_id INTEGER,
+               terminal_id TEXT,
+               fecha TEXT DEFAULT CURRENT_TIMESTAMP,
+               FOREIGN KEY (producto_id) REFERENCES productos (id))''')
+
+    # Ajustes de forma de pago (corrección entre efectivo/tarjeta/MP)
+    c.execute('''CREATE TABLE IF NOT EXISTS ajustes_caja (
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               usuario_id INTEGER NOT NULL,
+               fecha TEXT NOT NULL,
+               monto REAL NOT NULL,
+               metodo_desde TEXT NOT NULL,
+               metodo_hacia TEXT NOT NULL,
+               observaciones TEXT,
+               pdf_path TEXT,
+               terminal_id TEXT,
+               arqueo_id INTEGER,
+               FOREIGN KEY (usuario_id) REFERENCES usuarios (id))''')
 
     # Configuración fiscal / ticket (clave-valor)
     c.execute('''CREATE TABLE IF NOT EXISTS fiscal_config (
@@ -135,7 +176,10 @@ def init_db():
         "ticket_pie_texto": "Gracias por su compra",
         "ticket_ancho_mm": "58",
         "ticket_incluir_logo": "1",
-        "ticket_auto_imprimir": "0",
+        "ticket_auto_imprimir": "1",
+        "fiscal_auto_emitir": "1",
+        "fiscal_tipo_default": "C",
+        "cobro_rapido": "1",
     }
     for clave, valor in config_defaults.items():
         c.execute(

@@ -164,6 +164,9 @@ CONFIG_KEYS = [
     "ticket_ancho_mm",
     "ticket_incluir_logo",
     "ticket_auto_imprimir",
+    "fiscal_auto_emitir",
+    "fiscal_tipo_default",
+    "cobro_rapido",
 ]
 
 
@@ -265,6 +268,19 @@ def _validar_config_minima(cfg):
 
 def _cuit_solo_digitos(cuit):
     return "".join(c for c in (cuit or "") if c.isdigit())
+
+
+def _resolver_doc_receptor(payload):
+    """
+    Doc del comprador para WSFE / ticket.
+    80=CUIT (11), 96=DNI (7-8), 99=Consumidor Final sin identificar.
+    """
+    doc = _cuit_solo_digitos(str(payload.get("cliente_doc") or ""))
+    if len(doc) == 11:
+        return 80, int(doc), 5
+    if 7 <= len(doc) <= 8:
+        return 96, int(doc), 5
+    return 99, 0, 5
 
 
 def _normalizar_tipo_comprobante_por_emisor(tipo_solicitado, cfg):
@@ -499,11 +515,13 @@ def _emitir_arca_wsfe(payload, cfg):
         )
         cbte_tipo_map = {"A": 1, "B": 6, "C": 11}
         cbte_tipo = cbte_tipo_map.get(tipo_emitir, 6)
-        tipo_doc = 80 if tipo_emitir == "A" else 99
-        nro_doc = int(payload["cliente_doc"]) if tipo_emitir == "A" else 0
-        # RG 5616 / WSFE: obligatorio CondicionIVAReceptorId (error 10242 si falta).
-        # B/C + CF Doc 99/0 → 5 Consumidor Final. A + CUIT → 1 RI.
-        cond_iva_rec = 1 if tipo_emitir == "A" else 5
+        if tipo_emitir == "A":
+            tipo_doc, nro_doc, cond_iva_rec = 80, int(_cuit_solo_digitos(payload.get("cliente_doc") or "0") or 0), 1
+            if len(_cuit_solo_digitos(payload.get("cliente_doc") or "")) != 11:
+                raise RuntimeError("Factura A requiere CUIT del cliente (11 digitos).")
+        else:
+            # Factura B/C: si hay DNI/CUIT del cliente, se informa a AFIP y va al ticket.
+            tipo_doc, nro_doc, cond_iva_rec = _resolver_doc_receptor(payload)
         imp_total_d = Decimal(str(payload["total"])).quantize(
             Decimal("0.01"), rounding=ROUND_HALF_UP
         )
@@ -563,6 +581,10 @@ def _emitir_arca_wsfe(payload, cfg):
             "pto_vta": str(pto_vta),
             "tipo": tipo_emitir,
             "aviso_tipo": aviso_tipo,
+            "cliente_doc": str(nro_doc) if nro_doc else "",
+            "cliente_nombre": (payload.get("cliente_nombre") or "").strip(),
+            "tipo_doc_rec": tipo_doc,
+            "nro_doc_rec": nro_doc,
         }
 
     try:

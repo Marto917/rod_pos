@@ -9,6 +9,9 @@ import base64
 from fpdf import FPDF
 from db_init import get_db_path, get_base_dir
 from fiscal_service import get_fiscal_config, emitir_o_encolar
+from pos_config import is_client_mode, load_config
+from services.stock_ops import StockError, create_sale, get_product_by_barcode
+
 
 sales_window_open = False
 
@@ -21,12 +24,14 @@ def open_sales_panel(user_id, user_name):
     sales_window_open = True
 
     try:
-        conn = sqlite3.connect(get_db_path())
-    except sqlite3.Error as e:
+        from db import get_connection
+        conn = get_connection()
+    except Exception as e:
         messagebox.showerror("Error BD", "No se pudo conectar con la base de datos.\n" + str(e))
         sales_window_open = False
         return
     c = conn.cursor()
+    cfg_pos = load_config()
 
     ventana = tk.Toplevel()
     ventana.title(f"POS - Venta - {user_name}")
@@ -39,6 +44,12 @@ def open_sales_panel(user_id, user_name):
     total_var = tk.StringVar(value="0.00")
     descuento_activo = tk.BooleanVar(value=False)
     metodo_pago_var = tk.StringVar(value="EFECTIVO")
+    cliente_doc_var = tk.StringVar(value="")
+    cliente_nombre_var = tk.StringVar(value="")
+    status_var = tk.StringVar(value="Elegí tipo de ticket · F1 manual · F5 efectivo")
+    cobrando = {"activo": False}
+    metodo_btns = {}
+    tipo_sesion = {"modo": None, "cliente_doc": "", "cliente_nombre": ""}
 
     style = ttk.Style()
     style.theme_use('clam')
@@ -47,16 +58,35 @@ def open_sales_panel(user_id, user_name):
     style.configure('Header.TLabel', font=('Segoe UI', 14, 'bold'))
     style.configure('Discount.TLabel', foreground='red')
 
+    def flash_status(msg, ok=True):
+        status_var.set(msg)
+        try:
+            status_lbl.configure(fg="#166534" if ok else "#b91c1c")
+        except Exception:
+            pass
+        ventana.after(3500, lambda: status_var.set("F1 manual · F5 efectivo · F6 tarjeta · F7 Mercado Pago"))
+
+    def limpiar_cliente():
+        cliente_doc_var.set("")
+        cliente_nombre_var.set("")
+        try:
+            cliente_resumen_var.set("Cliente: Consumidor Final")
+        except Exception:
+            pass
+
     def mostrar_popup(titulo, mensaje):
+        """Solo para errores importantes; el cobro normal no bloquea con popups."""
         popup = tk.Toplevel(ventana)
         popup.title(titulo)
         popup.transient(ventana)
         popup.grab_set()
         popup.configure(bg="white")
-        ttk.Label(popup, text=mensaje, font=('Segoe UI', 10), padding=15).pack()
-        ttk.Button(popup, text="Aceptar", command=popup.destroy).pack(pady=10)
+        ttk.Label(popup, text=mensaje, font=('Segoe UI', 11), padding=15, wraplength=420).pack()
+        btn = ttk.Button(popup, text="OK", command=popup.destroy)
+        btn.pack(pady=10)
         popup.bind('<Return>', lambda e: popup.destroy())
-        popup.focus_force()
+        popup.bind('<Escape>', lambda e: popup.destroy())
+        btn.focus_set()
         popup.wait_window()
 
     def actualizar_ticket():
@@ -78,9 +108,13 @@ def open_sales_panel(user_id, user_name):
         descuento_var.set(f"{descuento:.2f}")
         total_var.set(f"{total:.2f}")
         ticket_tree.tag_configure('discount', foreground='red')
+        try:
+            cobrar_btn.configure(text="COBRAR  $%s" % total_var.get())
+        except Exception:
+            pass
 
     def precio_para_metodo(prod_data, metodo):
-        if metodo == "TARJETA CRÉDITO":
+        if metodo == "TARJETA":
             return float(prod_data.get("precio_lista", prod_data.get("precio", 0)))
         return float(prod_data.get("precio_publico", prod_data.get("precio", 0)))
 
@@ -127,9 +161,99 @@ def open_sales_panel(user_id, user_name):
         top.bind('<Return>', lambda e: aceptar())
         top.wait_window()
 
+    def abrir_ajuste_caja():
+        from services.ajuste_caja import METODOS_AJUSTE, registrar_ajuste
+
+        top = tk.Toplevel(ventana)
+        top.title("Ajuste de caja")
+        top.transient(ventana)
+        top.grab_set()
+        top.resizable(False, False)
+
+        ttk.Label(top, text="Corregir forma de pago", font=("Segoe UI", 12, "bold")).grid(
+            row=0, column=0, columnspan=2, padx=14, pady=(12, 8), sticky="w"
+        )
+        ttk.Label(top, text="Monto ($):").grid(row=1, column=0, padx=14, pady=6, sticky="w")
+        monto_entry = ttk.Entry(top, width=18)
+        monto_entry.grid(row=1, column=1, padx=14, pady=6, sticky="w")
+        monto_entry.focus_set()
+
+        metodos = list(METODOS_AJUSTE)
+        ttk.Label(top, text="Sacar de:").grid(row=2, column=0, padx=14, pady=6, sticky="w")
+        desde_var = tk.StringVar(value="EFECTIVO")
+        ttk.Combobox(top, textvariable=desde_var, values=metodos, state="readonly", width=16).grid(
+            row=2, column=1, padx=14, pady=6, sticky="w"
+        )
+
+        ttk.Label(top, text="Poner en:").grid(row=3, column=0, padx=14, pady=6, sticky="w")
+        hacia_var = tk.StringVar(value="TARJETA")
+        ttk.Combobox(top, textvariable=hacia_var, values=metodos, state="readonly", width=16).grid(
+            row=3, column=1, padx=14, pady=6, sticky="w"
+        )
+
+        ttk.Label(top, text="Observaciones:").grid(row=4, column=0, padx=14, pady=6, sticky="w")
+        obs_entry = ttk.Entry(top, width=28)
+        obs_entry.grid(row=4, column=1, padx=14, pady=6, sticky="w")
+
+        def confirmar():
+            raw = (monto_entry.get() or "").strip().replace(",", ".")
+            try:
+                monto = float(raw)
+            except ValueError:
+                messagebox.showwarning("Ajuste", "Monto inválido.", parent=top)
+                return
+            try:
+                result = registrar_ajuste(
+                    usuario_id=user_id,
+                    user_name=user_name,
+                    monto=monto,
+                    metodo_desde=desde_var.get(),
+                    metodo_hacia=hacia_var.get(),
+                    observaciones=obs_entry.get().strip(),
+                )
+            except Exception as e:
+                messagebox.showerror("Ajuste", str(e), parent=top)
+                return
+            pdf_path = result.get("pdf_path")
+            if pdf_path:
+                try:
+                    os.startfile(pdf_path, "print")
+                except Exception:
+                    try:
+                        os.startfile(pdf_path)
+                    except Exception:
+                        pass
+            messagebox.showinfo(
+                "Ajuste OK",
+                "Ajuste #%s registrado.\n$%.2f de %s → %s\n\nPDF guardado."
+                % (
+                    result.get("ajuste_id"),
+                    result.get("monto") or monto,
+                    result.get("metodo_desde"),
+                    result.get("metodo_hacia"),
+                ),
+                parent=ventana,
+            )
+            top.destroy()
+            codigo_entry.delete(0, tk.END)
+            codigo_entry.focus_set()
+
+        ttk.Button(top, text="Registrar e imprimir", command=confirmar).grid(
+            row=5, column=0, pady=12, padx=14
+        )
+        ttk.Button(top, text="Cancelar", command=top.destroy).grid(row=5, column=1, pady=12, padx=14)
+        top.bind("<Return>", lambda e: confirmar())
+        top.wait_window()
+
     def agregar_producto():
         codigo = codigo_entry.get().strip()
         if not codigo:
+            return
+        from services.ajuste_caja import es_codigo_ajuste
+
+        if es_codigo_ajuste(codigo):
+            codigo_entry.delete(0, tk.END)
+            abrir_ajuste_caja()
             return
         if codigo.upper() in ("ART", "MANUAL", "0"):
             agregar_articulo_manual()
@@ -152,11 +276,7 @@ def open_sales_panel(user_id, user_name):
             codigo_entry.delete(0, tk.END)
             return
 
-        c.execute(
-            "SELECT id, nombre, precio_lista, precio_publico, cantidad FROM productos WHERE codigo_barras = ?",
-            (codigo,),
-        )
-        prod = c.fetchone()
+        prod = get_product_by_barcode(codigo)
         if not prod:
             if messagebox.askyesno(
                 "Producto no encontrado",
@@ -167,17 +287,17 @@ def open_sales_panel(user_id, user_name):
             else:
                 mostrar_popup("Error", "Producto no encontrado")
             return
-        if prod[4] < 1:
+        if int(prod.get("cantidad") or 0) < 1:
             mostrar_popup("Sin stock", "No hay stock disponible")
             return
 
         productos_vendidos.append({
-            'id': prod[0],
+            'id': prod["id"],
             'codigo': codigo,
-            'nombre': prod[1],
-            'precio_lista': float(prod[2]),
-            'precio_publico': float(prod[3]),
-            'precio': float(prod[3]),
+            'nombre': prod["nombre"],
+            'precio_lista': float(prod["precio_lista"]),
+            'precio_publico': float(prod["precio_publico"]),
+            'precio': float(prod["precio_publico"]),
         })
         productos_vendidos[-1]["precio"] = precio_para_metodo(productos_vendidos[-1], metodo_pago_var.get())
         actualizar_ticket()
@@ -200,41 +320,216 @@ def open_sales_panel(user_id, user_name):
         total_var.set("0.00")
         descuento_activo.set(False)
         metodo_pago_var.set("EFECTIVO")
+        limpiar_cliente()
         actualizar_ticket()
+        resaltar_metodo()
         codigo_entry.focus_set()
 
-    def pedir_tipo_comprobante():
+    def elegir_tipo_comprobante(obligatorio=True):
+        """Cartel fullscreen: Factura C o Ticket interno. Al entrar y tras cada venta."""
         top = tk.Toplevel(ventana)
-        top.title("Tipo de comprobante")
+        top.title("Tipo de ticket")
         top.transient(ventana)
         top.grab_set()
-        data = {"tipo": "B", "cliente_doc": "", "cliente_nombre": ""}
+        try:
+            top.state("zoomed")
+        except Exception:
+            try:
+                top.attributes("-fullscreen", True)
+            except Exception:
+                top.geometry("1200x800")
+        top.configure(bg="#0f172a")
+        resultado = {"ok": False}
 
-        ttk.Label(top, text="Seleccione tipo fiscal").grid(row=0, column=0, columnspan=2, pady=10)
-        tipo_var = tk.StringVar(value="B")
-        ttk.Radiobutton(top, text="Ticket / Factura B", variable=tipo_var, value="B").grid(row=1, column=0, columnspan=2, sticky="w", padx=10)
-        ttk.Radiobutton(top, text="Factura A", variable=tipo_var, value="A").grid(row=2, column=0, columnspan=2, sticky="w", padx=10)
+        wrap = tk.Frame(top, bg="#0f172a")
+        wrap.place(relx=0.5, rely=0.5, anchor="center")
 
-        ttk.Label(top, text="CUIT cliente (solo A):").grid(row=3, column=0, sticky="e", padx=5, pady=4)
-        doc_entry = ttk.Entry(top, width=25)
-        doc_entry.grid(row=3, column=1, padx=5, pady=4)
-        ttk.Label(top, text="Razon social cliente (solo A):").grid(row=4, column=0, sticky="e", padx=5, pady=4)
-        nombre_entry = ttk.Entry(top, width=25)
-        nombre_entry.grid(row=4, column=1, padx=5, pady=4)
+        tk.Label(
+            wrap,
+            text="Que tipo de ticket vas a emitir?",
+            font=("Segoe UI", 28, "bold"),
+            bg="#0f172a",
+            fg="#f8fafc",
+        ).pack(pady=(0, 8))
+        tk.Label(
+            wrap,
+            text="Elegi primero. Despues escaneas y cobras.",
+            font=("Segoe UI", 14),
+            bg="#0f172a",
+            fg="#94a3b8",
+        ).pack(pady=(0, 24))
 
-        def aceptar():
-            data["tipo"] = tipo_var.get()
-            data["cliente_doc"] = doc_entry.get().strip()
-            data["cliente_nombre"] = nombre_entry.get().strip()
-            if data["tipo"] == "A" and (not data["cliente_doc"] or not data["cliente_nombre"]):
-                messagebox.showwarning("Fiscal", "Para Factura A completá CUIT y razón social.", parent=top)
+        modo_var = tk.StringVar(value="")
+        form_cliente = tk.Frame(wrap, bg="#1e293b", padx=20, pady=16)
+
+        tk.Label(
+            form_cliente,
+            text="Datos del cliente (Factura C)",
+            font=("Segoe UI", 13, "bold"),
+            bg="#1e293b",
+            fg="#f8fafc",
+        ).pack(anchor="w")
+        tk.Label(
+            form_cliente,
+            text="Si no pone DNI/CUIT = Consumidor Final",
+            font=("Segoe UI", 10),
+            bg="#1e293b",
+            fg="#94a3b8",
+        ).pack(anchor="w", pady=(0, 8))
+
+        fila = tk.Frame(form_cliente, bg="#1e293b")
+        fila.pack(fill="x", pady=4)
+        tk.Label(fila, text="DNI o CUIT:", bg="#1e293b", fg="#e2e8f0", width=14, anchor="e").pack(side="left")
+        doc_e = tk.Entry(fila, width=28, font=("Segoe UI", 14))
+        doc_e.pack(side="left", padx=6)
+
+        fila2 = tk.Frame(form_cliente, bg="#1e293b")
+        fila2.pack(fill="x", pady=4)
+        tk.Label(fila2, text="Nombre:", bg="#1e293b", fg="#e2e8f0", width=14, anchor="e").pack(side="left")
+        nom_e = tk.Entry(fila2, width=28, font=("Segoe UI", 14))
+        nom_e.pack(side="left", padx=6)
+
+        def mostrar_form(mostrar):
+            if mostrar:
+                form_cliente.pack(fill="x", pady=16)
+                doc_e.focus_set()
+            else:
+                form_cliente.pack_forget()
+
+        def elegir_c(event=None):
+            modo_var.set("factura_c")
+            btn_c.configure(relief="sunken", bd=6)
+            btn_t.configure(relief="raised", bd=2)
+            mostrar_form(True)
+
+        def elegir_t(event=None):
+            modo_var.set("interno")
+            btn_t.configure(relief="sunken", bd=6)
+            btn_c.configure(relief="raised", bd=2)
+            mostrar_form(False)
+
+        btns = tk.Frame(wrap, bg="#0f172a")
+        btns.pack(pady=12)
+        btn_c = tk.Button(
+            btns,
+            text="FACTURA C\nAtajo: tecla C",
+            bg="#2563eb",
+            fg="white",
+            font=("Segoe UI", 18, "bold"),
+            width=22,
+            height=4,
+            command=elegir_c,
+        )
+        btn_c.pack(side="left", padx=16)
+        btn_t = tk.Button(
+            btns,
+            text="TICKET INTERNO\nAtajo: tecla T",
+            bg="#64748b",
+            fg="white",
+            font=("Segoe UI", 18, "bold"),
+            width=22,
+            height=4,
+            command=elegir_t,
+        )
+        btn_t.pack(side="left", padx=16)
+
+        def confirmar(event=None):
+            modo = modo_var.get()
+            if not modo:
+                messagebox.showwarning(
+                    "Elegi una opcion",
+                    "Toca FACTURA C (tecla C) o TICKET INTERNO (tecla T).",
+                    parent=top,
+                )
+                return
+            if modo == "factura_c":
+                doc = "".join(ch for ch in doc_e.get() if ch.isdigit())
+                nom = nom_e.get().strip()
+                if doc and not (7 <= len(doc) <= 8 or len(doc) == 11):
+                    messagebox.showwarning("Cliente", "DNI (7-8) o CUIT (11 digitos).", parent=top)
+                    return
+                if doc and not nom:
+                    messagebox.showwarning("Cliente", "Si hay DNI/CUIT, pone el nombre.", parent=top)
+                    return
+                if nom and not doc:
+                    messagebox.showwarning("Cliente", "Si hay nombre, pone DNI o CUIT.", parent=top)
+                    return
+                tipo_sesion["cliente_doc"] = doc
+                tipo_sesion["cliente_nombre"] = nom
+                cliente_doc_var.set(doc)
+                cliente_nombre_var.set(nom)
+                if doc:
+                    cliente_resumen_var.set("Cliente: %s · %s" % (nom, doc))
+                else:
+                    cliente_resumen_var.set("Cliente: Consumidor Final · Factura C")
+            else:
+                tipo_sesion["cliente_doc"] = ""
+                tipo_sesion["cliente_nombre"] = ""
+                limpiar_cliente()
+                cliente_resumen_var.set("Ticket interno (sin factura)")
+            tipo_sesion["modo"] = modo
+            resultado["ok"] = True
+            top.destroy()
+            flash_status(
+                "Listo: %s · ahora escanea y cobra" % ("Factura C" if modo == "factura_c" else "Ticket interno"),
+                ok=True,
+            )
+            codigo_entry.focus_set()
+
+        def cancelar(event=None):
+            if obligatorio and tipo_sesion.get("modo") is None:
+                if not messagebox.askyesno(
+                    "Salir",
+                    "Sin tipo de ticket no se puede vender.\nCerrar la ventana de venta?",
+                    parent=top,
+                ):
+                    return
+                top.destroy()
+                al_cerrar()
                 return
             top.destroy()
 
-        ttk.Button(top, text="Aceptar", command=aceptar).grid(row=5, column=0, pady=10)
-        ttk.Button(top, text="Cancelar", command=lambda: data.update(tipo="") or top.destroy()).grid(row=5, column=1, pady=10)
+        acciones = tk.Frame(wrap, bg="#0f172a")
+        acciones.pack(pady=28)
+        tk.Button(
+            acciones,
+            text="CONFIRMAR  (Enter)",
+            bg="#16a34a",
+            fg="white",
+            font=("Segoe UI", 16, "bold"),
+            width=24,
+            height=2,
+            command=confirmar,
+        ).pack(side="left", padx=10)
+        tk.Button(
+            acciones,
+            text="Cancelar (Esc)",
+            bg="#dc2626",
+            fg="white",
+            font=("Segoe UI", 12, "bold"),
+            width=16,
+            height=2,
+            command=cancelar,
+        ).pack(side="left", padx=10)
+
+        tk.Label(
+            wrap,
+            text="Atajos: C = Factura C   |   T = Ticket interno   |   Enter = Confirmar",
+            font=("Segoe UI", 12),
+            bg="#0f172a",
+            fg="#64748b",
+        ).pack(pady=(8, 0))
+
+        top.bind("c", elegir_c)
+        top.bind("C", elegir_c)
+        top.bind("t", elegir_t)
+        top.bind("T", elegir_t)
+        top.bind("<Return>", confirmar)
+        top.bind("<Escape>", cancelar)
+        top.protocol("WM_DELETE_WINDOW", cancelar)
+        elegir_c()
         top.wait_window()
-        return data
+        return resultado["ok"]
 
     def generar_comprobante(venta_id, total, fiscal_info=None):
         try:
@@ -328,19 +623,38 @@ def open_sales_panel(user_id, user_name):
         except Exception:
             total_num = float(total or 0.0)
 
+        es_negro = bool((fiscal_info or {}).get("ticket_negro"))
+        titulo_cmp = "TICKET INTERNO" if es_negro else "FACTURA C (Cod. 011)"
+
         lineas = [
-            center32(debug_marker),
             center32(razon),
             center32("CUIT: %s" % cuit),
             center32("IIBB: %s" % iibb),
             center32("Inicio actividades: %s" % inicio_act),
             center32("IVA RESPONSABLE MONOTRIBUTO"),
             "=" * W,
-            center32("FACTURA C (Cod. 006)"),
+            center32(titulo_cmp),
             pad32("P.Vta: %s | Nro: %s" % (pto, nro_factura)),
             pad32("Fecha: %s | Hora: %s" % (fecha_h, hora_h)),
             "-" * W,
         ]
+
+        cli_nom = _safe_txt((fiscal_info or {}).get("cliente_nombre"), "")
+        cli_doc = "".join(
+            ch for ch in str((fiscal_info or {}).get("cliente_doc") or "") if ch.isdigit()
+        )
+        if not es_negro:
+            if cli_nom and cli_nom != "-":
+                lineas.append(pad32("CLIENTE:"))
+                for ln_cli in wrap32(cli_nom):
+                    lineas.append(pad32(ln_cli))
+                if cli_doc:
+                    label_doc = "CUIT" if len(cli_doc) == 11 else "DNI"
+                    lineas.append(pad32("%s: %s" % (label_doc, cli_doc)))
+                lineas.append("-" * W)
+            else:
+                lineas.append(pad32("Cliente: Consumidor Final"))
+                lineas.append("-" * W)
 
         if not items_ok:
             lineas.append(pad32("1 x PRODUCTO PRUEBA ....... $10.00"))
@@ -354,12 +668,18 @@ def open_sales_panel(user_id, user_name):
 
         lineas.append(pad32("TOTAL: $%.2f" % total_num))
         lineas.append("=" * W)
-        lineas.append(pad32("CAE: %s" % (cae if str(cae).strip() else "VACIO")))
-        lineas.append(pad32("Vto. CAE: %s" % (vto_cae if str(vto_cae).strip() else "-")))
+        if es_negro:
+            lineas.append(center32("Comprobante interno"))
+            lineas.append(center32("Sin CAE / no fiscal"))
+        else:
+            lineas.append(pad32("CAE: %s" % (cae if str(cae).strip() else "VACIO")))
+            lineas.append(pad32("Vto. CAE: %s" % (vto_cae if str(vto_cae).strip() else "-")))
 
         logo_path = (cfg.get("ticket_logo_path") or "").strip()
         has_logo = ((cfg.get("ticket_incluir_logo") or "0") == "1") and bool(logo_path) and os.path.isfile(logo_path)
-        include_qr = bool(str(cae).strip() and str((fiscal_info or {}).get("numero") or "").strip())
+        include_qr = (not es_negro) and bool(
+            str(cae).strip() and str((fiscal_info or {}).get("numero") or "").strip()
+        )
 
         # Alto dinámico exacto para cortar al final del ticket (solo ~1cm de margen inferior).
         logo_h = 11.0 if has_logo else 0.0
@@ -391,7 +711,7 @@ def open_sales_panel(user_id, user_name):
             lineas_impresas = 0
             for ln in lineas:
                 es_total = ln.strip().startswith("TOTAL:")
-                es_titulo = "FACTURA C" in ln or ln.strip() == razon[:W]
+                es_titulo = "FACTURA C" in ln or "TICKET INTERNO" in ln or ln.strip() == razon[:W]
                 pdf.set_font("Courier", "B" if (es_total or es_titulo) else "", 7)
                 pdf.set_text_color(0, 0, 0)
                 pdf.text(2.0, y_text, ln[:W])
@@ -443,8 +763,8 @@ def open_sales_panel(user_id, user_name):
                         "importe": round(total_num, 2),
                         "moneda": "PES",
                         "ctz": 1,
-                        "tipoDocRec": 99,
-                        "nroDocRec": 0,
+                        "tipoDocRec": int((fiscal_info or {}).get("tipo_doc_rec") or (80 if len(cli_doc) == 11 else (96 if cli_doc else 99))),
+                        "nroDocRec": int(cli_doc or 0),
                         "tipoCodAut": "E",
                         "codAut": int(str(cae).strip()),
                     }
@@ -490,144 +810,229 @@ def open_sales_panel(user_id, user_name):
         return nombre_archivo
 
     def finalizar_venta(event=None):
-        if not productos_vendidos:
-            mostrar_popup("Atención", "No hay productos cargados")
+        cobrar_con_metodo(metodo_pago_var.get())
+
+    def cobrar_con_metodo(metodo, event=None):
+        if cobrando["activo"]:
+            flash_status("Ya se está cobrando… esperá", ok=False)
             return
+        if not productos_vendidos:
+            flash_status("No hay productos. Escaneá antes de cobrar.", ok=False)
+            return
+
+        if not tipo_sesion.get("modo"):
+            flash_status("Primero elegi Factura C o Ticket interno.", ok=False)
+            elegir_tipo_comprobante(obligatorio=False)
+            if not tipo_sesion.get("modo"):
+                return
+
+        metodo_pago_var.set(metodo)
+        recalcular_precios_por_metodo()
+        resaltar_metodo()
+
+        emitir_fiscal = tipo_sesion["modo"] == "factura_c"
+        cli_doc = (tipo_sesion.get("cliente_doc") or "").strip()
+        cli_nom = (tipo_sesion.get("cliente_nombre") or "").strip()
+
         total = float(total_var.get())
-        metodo_pago = metodo_pago_var.get()
         fecha = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        cobrando["activo"] = True
         try:
-            c.execute("INSERT INTO ventas (usuario_id, total, fecha, metodo_pago) VALUES (?, ?, ?, ?)",
-                      (user_id, total, fecha, metodo_pago))
-            venta_id = c.lastrowid
+            cobrar_btn.configure(state="disabled", text="COBRANDO…")
+        except Exception:
+            pass
+        tipo_txt = "Factura C" if emitir_fiscal else "ticket interno"
+        flash_status("Cobrando $%s (%s) · %s…" % (("%.2f" % total), metodo, tipo_txt), ok=True)
+        ventana.update_idletasks()
+
+        try:
+            items = []
             for p in productos_vendidos:
-                if p['id']:
-                    c.execute("INSERT INTO detalle_ventas (venta_id, producto_id, cantidad, precio_unitario) VALUES (?, ?, ?, ?)",
-                              (venta_id, p['id'], 1, p['precio']))
-                    c.execute("UPDATE productos SET cantidad = cantidad - 1 WHERE id = ?", (p['id'],))
-            conn.commit()
-            fiscal_info = None
-            forzar_no_imprimir = False
-            emitir_fiscal = messagebox.askyesno(
-                "Comprobante fiscal",
-                "Desea emitir comprobante fiscal ARCA para esta venta?",
-                parent=ventana,
-            )
-            if emitir_fiscal:
-                data_tipo = pedir_tipo_comprobante()
-                if data_tipo.get("tipo"):
-                    payload = {
-                        "venta_id": venta_id,
-                        "fecha": fecha,
-                        "total": total,
-                        "metodo_pago": metodo_pago,
-                        "tipo_comprobante": data_tipo["tipo"],
-                        "cliente_doc": data_tipo.get("cliente_doc", ""),
-                        "cliente_nombre": data_tipo.get("cliente_nombre", ""),
-                        "items": [
-                            {
-                                "codigo": p["codigo"],
-                                "nombre": p["nombre"],
-                                "precio": p["precio"],
-                                "cantidad": 1,
-                            }
-                            for p in productos_vendidos
-                            if p["codigo"] != "105"
-                        ],
-                    }
-                    c.execute(
-                        "UPDATE ventas SET fiscal_solicitado=1, fiscal_tipo=?, fiscal_estado='EN_PROCESO' WHERE id=?",
-                        (data_tipo["tipo"], venta_id),
+                if p.get("id"):
+                    items.append(
+                        {
+                            "producto_id": p["id"],
+                            "id": p["id"],
+                            "cantidad": 1,
+                            "precio": p["precio"],
+                        }
                     )
-                    conn.commit()
-                    ok_fiscal, res_fiscal = emitir_o_encolar(venta_id, payload)
-                    if ok_fiscal:
-                        fiscal_info = {
+            sale = create_sale(
+                usuario_id=user_id,
+                total=total,
+                metodo_pago=metodo,
+                items=items,
+                fecha=fecha,
+            )
+            venta_id = sale["venta_id"]
+
+            cfg = get_fiscal_config()
+            tipo_default = (cfg.get("fiscal_tipo_default") or "C").strip().upper() or "C"
+
+            fiscal_info = {
+                "ticket_negro": not emitir_fiscal,
+                "cliente_doc": cli_doc,
+                "cliente_nombre": cli_nom,
+                "tipo_doc_rec": 80 if len(cli_doc) == 11 else (96 if cli_doc else 99),
+                "nro_doc_rec": int(cli_doc) if cli_doc.isdigit() else 0,
+            }
+            forzar_no_imprimir = False
+
+            if emitir_fiscal:
+                payload = {
+                    "venta_id": venta_id,
+                    "fecha": fecha,
+                    "total": total,
+                    "metodo_pago": metodo,
+                    "tipo_comprobante": tipo_default,
+                    "cliente_doc": cli_doc,
+                    "cliente_nombre": cli_nom,
+                    "items": [
+                        {
+                            "codigo": p["codigo"],
+                            "nombre": p["nombre"],
+                            "precio": p["precio"],
+                            "cantidad": 1,
+                        }
+                        for p in productos_vendidos
+                        if p["codigo"] != "105"
+                    ],
+                }
+                try:
+                    if is_client_mode():
+                        from services.stock_ops import enqueue_fiscal
+
+                        fiscal_res = enqueue_fiscal(venta_id, payload)
+                        ok_fiscal = bool(fiscal_res.get("ok"))
+                        res_fiscal = fiscal_res.get("result") or {}
+                    else:
+                        c.execute(
+                            "UPDATE ventas SET fiscal_solicitado=1, fiscal_tipo=?, fiscal_estado='EN_PROCESO' WHERE id=?",
+                            (tipo_default, venta_id),
+                        )
+                        conn.commit()
+                        ok_fiscal, res_fiscal = emitir_o_encolar(venta_id, payload)
+                except Exception as e_fiscal:
+                    ok_fiscal = False
+                    res_fiscal = {"error": str(e_fiscal)}
+
+                if ok_fiscal:
+                    fiscal_info.update(
+                        {
                             "estado": "EMITIDO",
                             "cae": res_fiscal.get("cae", ""),
                             "vto_cae": res_fiscal.get("vto_cae", ""),
-                            "tipo": res_fiscal.get("tipo", data_tipo.get("tipo", "")),
+                            "tipo": res_fiscal.get("tipo", tipo_default),
                             "numero": res_fiscal.get("numero", ""),
                             "pto_vta": res_fiscal.get("pto_vta", ""),
+                            "cliente_doc": res_fiscal.get("cliente_doc") or cli_doc,
+                            "cliente_nombre": res_fiscal.get("cliente_nombre") or cli_nom,
+                            "tipo_doc_rec": res_fiscal.get("tipo_doc_rec") or fiscal_info["tipo_doc_rec"],
+                            "nro_doc_rec": res_fiscal.get("nro_doc_rec") or fiscal_info["nro_doc_rec"],
                         }
-                        if not fiscal_info.get("cae"):
-                            forzar_no_imprimir = True
-                            mostrar_popup(
-                                "Fiscal",
-                                "No se recibió CAE. No se enviará ticket a impresora para evitar gasto de papel.",
-                            )
-                        aviso_tipo = (res_fiscal.get("aviso_tipo") or "").strip()
-                        if aviso_tipo:
-                            mostrar_popup("Fiscal", "Comprobante fiscal emitido OK.\n" + aviso_tipo)
-                        else:
-                            mostrar_popup("Fiscal", "Comprobante fiscal emitido OK.")
-                    else:
-                        err_fiscal = (res_fiscal or {}).get("error", "")
-                        fiscal_info = {
-                            "estado": "PENDIENTE",
-                            "tipo": data_tipo.get("tipo", ""),
-                        }
-                        forzar_no_imprimir = True
-                        if "Error de Autenticación WSAA" in err_fiscal:
-                            mostrar_popup(
-                                "Fiscal",
-                                "Error de Autenticación WSAA.\n"
-                                "No se imprimirá ticket automático en este intento.\n"
-                                "Revisá debug_afip.txt y configuración ARCA.",
-                            )
-                        else:
-                            mostrar_popup("Fiscal", "No se pudo emitir ahora. Quedo en pendientes ARCA.")
-                else:
-                    c.execute(
-                        "UPDATE ventas SET fiscal_solicitado=0, fiscal_estado='NO_SOLICITADO' WHERE id=?",
-                        (venta_id,),
                     )
-                    conn.commit()
-                    forzar_no_imprimir = False
+                    if not (fiscal_info.get("cae") or "").strip():
+                        forzar_no_imprimir = True
+                        flash_status("Venta OK. Fiscal sin CAE → no se imprime (papel).", ok=False)
+                else:
+                    fiscal_info["estado"] = "PENDIENTE"
+                    fiscal_info["tipo"] = tipo_default
+                    err = (res_fiscal or {}).get("error", "")
+                    if "WSAA" in err:
+                        forzar_no_imprimir = True
+                        flash_status("Venta OK. Error ARCA (WSAA). Ticket no impreso.", ok=False)
+                    else:
+                        flash_status("Venta OK. Fiscal pendiente ARCA.", ok=False)
             else:
-                c.execute(
-                    "UPDATE ventas SET fiscal_solicitado=0, fiscal_estado='NO_SOLICITADO' WHERE id=?",
-                    (venta_id,),
-                )
-                conn.commit()
-                forzar_no_imprimir = False
-            cfg = get_fiscal_config()
+                if not is_client_mode():
+                    try:
+                        c.execute(
+                            "UPDATE ventas SET fiscal_solicitado=0, fiscal_estado='NO_SOLICITADO' WHERE id=?",
+                            (venta_id,),
+                        )
+                        conn.commit()
+                    except Exception:
+                        pass
+
+            # Siempre guardar PDF (factura o interno) en la misma carpeta comprobantes/
+            pdf_path = None
             try:
                 pdf_path = generar_comprobante(venta_id, total, fiscal_info=fiscal_info)
             except Exception as e:
-                messagebox.showwarning(
-                    "Comprobante",
-                    "Venta registrada correctamente.\nNo se pudo guardar el PDF: %s" % str(e),
-                    parent=ventana,
+                flash_status("Venta OK. Falló PDF: %s" % str(e)[:60], ok=False)
+
+            # Solo se imprime en papel la factura fiscal; el ticket interno solo deja PDF.
+            auto_print = (
+                emitir_fiscal
+                and (cfg.get("ticket_auto_imprimir") or "1") == "1"
+                and not forzar_no_imprimir
+            )
+            if pdf_path and auto_print:
+                try:
+                    if sys.platform.startswith("win"):
+                        os.startfile(pdf_path, "print")
+                    else:
+                        raise RuntimeError("Impresión solo en Windows")
+                except Exception as e:
+                    flash_status("Venta OK. No se pudo imprimir: %s" % str(e)[:40], ok=False)
+
+            if emitir_fiscal and not forzar_no_imprimir:
+                flash_status(
+                    "LISTO · $%s · %s · %s · #%s"
+                    % (("%.2f" % total), metodo, tipo_txt, venta_id),
+                    ok=True,
                 )
-            else:
-                mostrar_popup("Éxito", "Venta registrada\nTotal: $%s\nMétodo: %s" % (("%.2f" % total), metodo_pago))
-                auto_print = (cfg.get("ticket_auto_imprimir") or "0") == "1"
-                if fiscal_info is not None and not (fiscal_info.get("cae") or "").strip():
-                    forzar_no_imprimir = True
-                if forzar_no_imprimir:
-                    auto_print = False
-                desea_imprimir = auto_print or messagebox.askyesno(
-                    "Impresion",
-                    "Desea imprimir ticket ahora?",
-                    parent=ventana,
+            elif not emitir_fiscal:
+                flash_status(
+                    "LISTO · $%s · %s · ticket interno · PDF en comprobantes · #%s"
+                    % (("%.2f" % total), metodo, venta_id),
+                    ok=True,
                 )
-                if desea_imprimir:
-                    try:
-                        if sys.platform.startswith("win"):
-                            os.startfile(pdf_path, "print")
-                        else:
-                            raise RuntimeError("Impresion directa solo soportada en Windows")
-                    except Exception as e:
-                        messagebox.showwarning("Impresion", "No se pudo enviar a impresora:\n%s" % str(e), parent=ventana)
             resetear_ticket()
+            tipo_sesion["modo"] = None
+            tipo_sesion["cliente_doc"] = ""
+            tipo_sesion["cliente_nombre"] = ""
+            ventana.after(200, lambda: elegir_tipo_comprobante(obligatorio=True))
+        except StockError as e:
+            mostrar_popup("Sin stock / error", str(e))
+            flash_status(str(e), ok=False)
         except sqlite3.Error as e:
-            conn.rollback()
+            try:
+                conn.rollback()
+            except Exception:
+                pass
             mostrar_popup("Error BD", str(e))
+        except Exception as e:
+            mostrar_popup("Error", str(e))
+        finally:
+            cobrando["activo"] = False
+            try:
+                cobrar_btn.configure(state="normal", text="COBRAR  $%s" % total_var.get())
+            except Exception:
+                pass
+            codigo_entry.focus_set()
+
+    def elegir_metodo(metodo):
+        metodo_pago_var.set(metodo)
+        recalcular_precios_por_metodo()
+        resaltar_metodo()
+        codigo_entry.focus_set()
+
+    def resaltar_metodo():
+        actual = metodo_pago_var.get()
+        for nombre, btn in metodo_btns.items():
+            if nombre == actual:
+                btn.configure(relief="sunken", bd=4, highlightthickness=3)
+            else:
+                btn.configure(relief="raised", bd=2, highlightthickness=0)
 
     def cancelar_venta(event=None):
-        if confirmar("¿Cancelar la venta actual?"):
+        if not productos_vendidos:
             al_cerrar()
+            return
+        if messagebox.askyesno("Cancelar", "¿Cancelar esta venta y borrar el ticket?", parent=ventana):
+            resetear_ticket()
+            flash_status("Venta cancelada.", ok=False)
 
     def confirmar(mensaje):
         popup = tk.Toplevel(ventana)
@@ -656,24 +1061,34 @@ def open_sales_panel(user_id, user_name):
 
     ventana.protocol("WM_DELETE_WINDOW", al_cerrar)
 
+    cliente_resumen_var = tk.StringVar(value="Cliente: Consumidor Final")
+
     # Layout
     top_frame = ttk.Frame(ventana, padding=10)
     top_frame.pack(fill='x')
-    ttk.Label(top_frame, text=f"POS Venta - {user_name}", style="Header.TLabel").pack(side='left')
+    ttk.Label(top_frame, text="POS Venta - %s" % user_name, style="Header.TLabel").pack(side='left')
+    ttk.Label(
+        top_frame,
+        text="  Primero tipo de ticket · F1 manual · F5/F6/F7 cobrar",
+        foreground="#475569",
+    ).pack(side='left', padx=12)
 
     input_frame = ttk.Frame(ventana, padding=10)
     input_frame.pack(fill='x')
     ttk.Label(input_frame, text="Código:").grid(row=0, column=0, padx=5)
-    codigo_entry = ttk.Entry(input_frame, width=30)
+    codigo_entry = ttk.Entry(input_frame, width=30, font=('Segoe UI', 14))
     codigo_entry.grid(row=0, column=1, padx=5)
     codigo_entry.focus_set()
     ttk.Button(input_frame, text="Agregar", command=agregar_producto).grid(row=0, column=2, padx=10)
-    ttk.Button(input_frame, text="Manual", command=agregar_articulo_manual).grid(row=0, column=3, padx=4)
+    ttk.Button(input_frame, text="Manual (F1)", command=agregar_articulo_manual).grid(row=0, column=3, padx=4)
+    ttk.Label(input_frame, textvariable=cliente_resumen_var, foreground="#1e40af").grid(
+        row=0, column=4, padx=10, sticky='w'
+    )
 
     ticket_frame = ttk.LabelFrame(ventana, text="Ticket de Venta", padding=10)
     ticket_frame.pack(fill='both', expand=True, padx=10, pady=10)
     columnas = ("Código", "Producto", "Precio", "Cantidad", "Subtotal")
-    ticket_tree = ttk.Treeview(ticket_frame, columns=columnas, show='headings', height=15)
+    ticket_tree = ttk.Treeview(ticket_frame, columns=columnas, show='headings', height=12)
     for col in columnas:
         ticket_tree.heading(col, text=col)
         ticket_tree.column(col, anchor='center')
@@ -681,29 +1096,102 @@ def open_sales_panel(user_id, user_name):
     ticket_tree.pack(fill='both', expand=True)
     ticket_tree.tag_configure('discount', foreground='red')
 
-    resumen_frame = ttk.Frame(ventana, padding=10)
-    resumen_frame.pack(fill='x')
-    ttk.Label(resumen_frame, text="Subtotal: $").grid(row=0, column=0, sticky='e')
-    ttk.Label(resumen_frame, textvariable=subtotal_var).grid(row=0, column=1, sticky='w', padx=10)
-    ttk.Label(resumen_frame, text="Descuento: $").grid(row=1, column=0, sticky='e')
-    ttk.Label(resumen_frame, textvariable=descuento_var).grid(row=1, column=1, sticky='w', padx=10)
-    ttk.Label(resumen_frame, text="Total: $", font=('Segoe UI', 12, 'bold')).grid(row=2, column=0, sticky='e', pady=5)
-    ttk.Label(resumen_frame, textvariable=total_var, font=('Segoe UI', 12, 'bold')).grid(row=2, column=1, sticky='w', padx=10)
-    ttk.Label(resumen_frame, text="Método de pago:").grid(row=0, column=2, sticky='e', padx=10)
-    metodo_pago = ttk.Combobox(resumen_frame, textvariable=metodo_pago_var,
-                                values=["EFECTIVO", "TARJETA DÉBITO", "TARJETA CRÉDITO", "MERCADOPAGO"],
-                                state="readonly", width=20)
-    metodo_pago.grid(row=0, column=3, sticky='w')
-    metodo_pago.bind("<<ComboboxSelected>>", lambda e: recalcular_precios_por_metodo())
-    boton_frame = ttk.Frame(resumen_frame)
-    boton_frame.grid(row=0, column=4, rowspan=3, padx=20)
-    tk.Button(boton_frame, text="PAGAR", bg="green", fg="white", font=('Segoe UI', 14, 'bold'), width=15, height=2, command=finalizar_venta).pack(pady=5)
-    tk.Button(boton_frame, text="CANCELAR", bg="red", fg="white", font=('Segoe UI', 12, 'bold'), width=15, command=cancelar_venta).pack(pady=5)
+    cobro_frame = tk.Frame(ventana, bg="#0f172a", padx=12, pady=12)
+    cobro_frame.pack(fill='x', padx=8, pady=8)
+
+    totales = tk.Frame(cobro_frame, bg="#0f172a")
+    totales.pack(side='left', padx=8)
+    tk.Label(totales, text="TOTAL", fg="#94a3b8", bg="#0f172a", font=('Segoe UI', 11, 'bold')).pack(anchor='w')
+    tk.Label(
+        totales,
+        textvariable=total_var,
+        fg="#f8fafc",
+        bg="#0f172a",
+        font=('Segoe UI', 28, 'bold'),
+    ).pack(anchor='w')
+    tk.Label(
+        totales,
+        text="Subtotal $",
+        fg="#64748b",
+        bg="#0f172a",
+        font=('Segoe UI', 9),
+    ).pack(anchor='w', side='left')
+    tk.Label(totales, textvariable=subtotal_var, fg="#64748b", bg="#0f172a", font=('Segoe UI', 9)).pack(
+        anchor='w', side='left'
+    )
+
+    metodos_frame = tk.Frame(cobro_frame, bg="#0f172a")
+    metodos_frame.pack(side='left', expand=True, padx=16)
+
+    def _mk_metodo(texto, valor, color, col):
+        b = tk.Button(
+            metodos_frame,
+            text=texto,
+            bg=color,
+            fg="white",
+            activebackground=color,
+            activeforeground="white",
+            font=('Segoe UI', 11, 'bold'),
+            width=12,
+            height=2,
+            command=lambda v=valor: cobrar_con_metodo(v),
+        )
+        b.grid(row=0, column=col, padx=4, pady=2)
+        metodo_btns[valor] = b
+
+    _mk_metodo("EFECTIVO\n(F5)", "EFECTIVO", "#15803d", 0)
+    _mk_metodo("TARJETA\n(F6)", "TARJETA", "#1d4ed8", 1)
+    _mk_metodo("MERCADO PAGO\n(F7)", "MERCADOPAGO", "#0369a1", 2)
+
+    acciones = tk.Frame(cobro_frame, bg="#0f172a")
+    acciones.pack(side='right', padx=8)
+    cobrar_btn = tk.Button(
+        acciones,
+        text="COBRAR  $0.00",
+        bg="#22c55e",
+        fg="white",
+        activebackground="#16a34a",
+        activeforeground="white",
+        font=('Segoe UI', 16, 'bold'),
+        width=16,
+        height=2,
+        command=finalizar_venta,
+    )
+    cobrar_btn.pack(pady=2)
+    tk.Button(
+        acciones,
+        text="BORRAR TICKET (Esc)",
+        bg="#dc2626",
+        fg="white",
+        font=('Segoe UI', 10, 'bold'),
+        width=16,
+        command=cancelar_venta,
+    ).pack(pady=2)
+
+    status_lbl = tk.Label(
+        ventana,
+        textvariable=status_var,
+        fg="#166534",
+        bg="#eaeaea",
+        font=('Segoe UI', 11, 'bold'),
+        anchor='w',
+        padx=14,
+        pady=6,
+    )
+    status_lbl.pack(fill='x')
+
+    resaltar_metodo()
 
     ventana.bind('<Return>', lambda e: agregar_producto())
-    ventana.bind('<F1>', finalizar_venta)
-    ventana.bind('<F2>', lambda e: agregar_articulo_manual())
+    ventana.bind('<F1>', lambda e: agregar_articulo_manual())
+    ventana.bind('<F2>', lambda e: elegir_tipo_comprobante(obligatorio=False))
     ventana.bind('<Escape>', cancelar_venta)
-    ventana.bind('<F5>', eliminar_item)
+    ventana.bind('<Delete>', eliminar_item)
+    ventana.bind('<F4>', eliminar_item)
+    ventana.bind('<F5>', lambda e: cobrar_con_metodo('EFECTIVO'))
+    ventana.bind('<F6>', lambda e: cobrar_con_metodo('TARJETA'))
+    ventana.bind('<F7>', lambda e: cobrar_con_metodo('MERCADOPAGO'))
+
+    ventana.after(100, lambda: elegir_tipo_comprobante(obligatorio=True))
 
     ventana.mainloop()

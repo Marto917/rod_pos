@@ -1,0 +1,5 @@
+# ROD POS — dependencias de desarrollo
+pillow
+fpdf2
+qrcode
+pyinstaller
