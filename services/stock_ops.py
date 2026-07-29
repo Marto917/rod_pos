@@ -8,6 +8,7 @@ from typing import Any
 
 from db import get_connection
 from pos_config import is_client_mode, load_config, server_base_url
+import urllib.parse
 
 
 class StockError(Exception):
@@ -272,6 +273,7 @@ def crear_venta_local(payload: dict) -> dict:
     from datetime import datetime
 
     items = payload.get("items") or []
+    pagos = payload.get("pagos") or []
     # Se permite venta sin líneas de stock (ej. solo descuento / ítems manuales sin id)
 
     conn = get_connection()
@@ -293,6 +295,21 @@ def crear_venta_local(payload: dict) -> dict:
             ),
         )
         venta_id = c.lastrowid
+
+        # Desglose de pago mixto (o un solo método explícito)
+        for p in pagos:
+            metodo = str(p.get("metodo") or "").strip().upper()
+            try:
+                monto = float(p.get("monto") or 0)
+            except Exception:
+                monto = 0.0
+            if not metodo or monto <= 0:
+                continue
+            c.execute(
+                "INSERT INTO venta_pagos (venta_id, metodo, monto) VALUES (?, ?, ?)",
+                (venta_id, metodo, round(monto, 2)),
+            )
+
         for item in items:
             pid = item.get("producto_id") or item.get("id")
             if not pid:
@@ -350,6 +367,7 @@ def create_sale(
     metodo_pago: str,
     items: list[dict],
     fecha: str | None = None,
+    pagos: list[dict] | None = None,
 ) -> dict:
     """Crea venta y descuenta stock (local o servidor LAN)."""
     from datetime import datetime
@@ -362,6 +380,7 @@ def create_sale(
         "items": items,
         "fecha": fecha or datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "terminal_id": cfg.get("terminal_id"),
+        "pagos": pagos or [],
     }
     if is_client_mode():
         data = _http_json("POST", "/api/ventas", payload)
@@ -370,6 +389,91 @@ def create_sale(
         return data
 
     return crear_venta_local(payload)
+
+
+def anular_venta_local(venta_id: int, *, usuario_id: int | None = None, motivo: str = "ANULACION") -> dict:
+    """Revierte stock, borra detalle/pendientes fiscales y elimina la venta."""
+    from datetime import datetime
+
+    cfg = load_config()
+    ahora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    conn = get_connection()
+    try:
+        c = conn.cursor()
+        c.execute("BEGIN IMMEDIATE")
+        c.execute("SELECT id FROM ventas WHERE id=?", (venta_id,))
+        if not c.fetchone():
+            conn.rollback()
+            raise StockError("La venta #%s no existe" % venta_id)
+
+        c.execute(
+            "SELECT producto_id, cantidad FROM detalle_ventas WHERE venta_id=? AND producto_id IS NOT NULL",
+            (venta_id,),
+        )
+        detalles = c.fetchall()
+        for row in detalles:
+            pid = int(row["producto_id"])
+            cant = int(row["cantidad"] or 0)
+            if cant <= 0:
+                continue
+            c.execute("SELECT cantidad, nombre FROM productos WHERE id=?", (pid,))
+            prod = c.fetchone()
+            if not prod:
+                continue
+            stock_antes = int(prod["cantidad"] or 0)
+            stock_despues = stock_antes + cant
+            c.execute("UPDATE productos SET cantidad=? WHERE id=?", (stock_despues, pid))
+            c.execute(
+                """
+                INSERT INTO stock_movimientos (
+                    producto_id, delta, stock_antes, stock_despues,
+                    motivo, referencia, usuario_id, terminal_id, fecha
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    pid,
+                    cant,
+                    stock_antes,
+                    stock_despues,
+                    motivo or "ANULACION",
+                    str(venta_id),
+                    usuario_id,
+                    cfg.get("terminal_id"),
+                    ahora,
+                ),
+            )
+
+        c.execute("DELETE FROM detalle_ventas WHERE venta_id=?", (venta_id,))
+        try:
+            c.execute("DELETE FROM venta_pagos WHERE venta_id=?", (venta_id,))
+        except Exception:
+            pass
+        c.execute("DELETE FROM fiscal_pendientes WHERE venta_id=?", (venta_id,))
+        c.execute("DELETE FROM ventas WHERE id=?", (venta_id,))
+        conn.commit()
+        return {"ok": True, "venta_id": venta_id}
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def anular_venta(venta_id: int, *, usuario_id: int | None = None, motivo: str = "ANULACION") -> dict:
+    if is_client_mode():
+        data = _http_json(
+            "POST",
+            "/api/ventas/anular",
+            {
+                "venta_id": int(venta_id),
+                "usuario_id": usuario_id,
+                "motivo": motivo or "ANULACION",
+            },
+        )
+        if not data.get("ok"):
+            raise StockError(data.get("error") or "No se pudo anular la venta")
+        return data
+    return anular_venta_local(venta_id, usuario_id=usuario_id, motivo=motivo)
 
 
 def enqueue_fiscal(venta_id: int, payload: dict) -> dict:
@@ -392,6 +496,3 @@ def healthcheck() -> dict[str, Any]:
     if is_client_mode():
         return _http_json("GET", "/api/health")
     return {"ok": True, "modo": "local"}
-
-
-import urllib.parse  # noqa: E402

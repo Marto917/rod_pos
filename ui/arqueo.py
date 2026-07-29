@@ -5,10 +5,12 @@ import os
 import subprocess
 import sys
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import ttk
+from ui import dialogs as messagebox
 
 from pos_config import load_config
 from services.cierre_caja import cerrar_caja, resumen_pendiente
+from ui import theme as ui_theme
 
 
 def _open_file(path: str) -> None:
@@ -32,7 +34,7 @@ def open_arqueo_panel(user_id, user_name):
         ventana.state("zoomed")
     except Exception:
         pass
-    ventana.configure(bg="#f4f6f8")
+    ventana.configure(bg=ui_theme.BG)
 
     fondo_var = tk.DoubleVar(value=0.0)
     efectivo_var = tk.DoubleVar(value=0.0)
@@ -42,11 +44,7 @@ def open_arqueo_panel(user_id, user_name):
     estado_var = tk.StringVar(value="")
 
     style = ttk.Style(ventana)
-    style.configure("Title.TLabel", font=("Segoe UI", 16, "bold"))
-    style.configure("Card.TFrame", background="#ffffff")
-    style.configure("Muted.TLabel", foreground="#64748b")
-    style.configure("DiffOk.TLabel", foreground="#15803d", font=("Segoe UI", 12, "bold"))
-    style.configure("DiffBad.TLabel", foreground="#b91c1c", font=("Segoe UI", 12, "bold"))
+    ui_theme.apply_ttk_style(style)
 
     main = ttk.Frame(ventana, padding=16)
     main.pack(fill="both", expand=True)
@@ -188,7 +186,12 @@ def open_arqueo_panel(user_id, user_name):
                 detalle.insert(
                     "",
                     "end",
-                    values=(v["id"], hora, v.get("metodo_pago") or "", "%.2f" % float(v["total"] or 0)),
+                    values=(
+                        v["id"],
+                        hora,
+                        v.get("metodo_label") or v.get("metodo_pago") or "",
+                        "%.2f" % float(v["total"] or 0),
+                    ),
                 )
             for aj in data.get("ajustes") or []:
                 hora = str(aj.get("fecha") or "")[-8:]
@@ -285,10 +288,11 @@ def open_arqueo_panel(user_id, user_name):
     ttk.Button(btns, text="Cerrar caja y exportar Excel", command=confirmar_cierre).pack(
         side="left", padx=4
     )
-    ttk.Button(btns, text="Cerrar ventana", command=cancelar).pack(side="right", padx=4)
+    ttk.Button(btns, text="Volver al Menú", command=cancelar).pack(side="right", padx=4)
 
     fondo_var.trace_add("write", calcular)
     efectivo_var.trace_add("write", calcular)
 
+    ventana.bind("<Escape>", lambda e: cancelar())
     ventana.protocol("WM_DELETE_WINDOW", cancelar)
     refrescar()

@@ -1,7 +1,9 @@
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk
+from ui import dialogs as messagebox
 
 from services.stock_ops import StockError, list_products
+from ui import theme as ui_theme
 
 
 def open_stock_view(user_id, user_name):
@@ -12,14 +14,10 @@ def open_stock_view(user_id, user_name):
         ventana.state("zoomed")
     except Exception:
         pass
-    ventana.configure(bg="#f0f0f0")
+    ui_theme.apply_window(ventana)
 
-    style = ttk.Style()
-    style.configure("TFrame", background="#f0f0f0")
-    style.configure("TLabel", background="#f0f0f0", font=("Arial", 11))
-    style.configure("TButton", font=("Arial", 11))
-    style.configure("Treeview", rowheight=25, font=("Arial", 10))
-    style.configure("Treeview.Heading", font=("Arial", 11, "bold"))
+    style = ttk.Style(ventana)
+    ui_theme.apply_ttk_style(style)
 
     main_frame = ttk.Frame(ventana, padding=20)
     main_frame.pack(fill="both", expand=True)
@@ -96,7 +94,15 @@ def open_stock_view(user_id, user_name):
     scrollbar.pack(side="right", fill="y")
     tree.configure(yscrollcommand=scrollbar.set)
 
+    def volver():
+        ventana.destroy()
+
+    btns = ttk.Frame(main_frame)
+    btns.pack(fill="x", pady=(12, 0))
+    ttk.Button(btns, text="Volver al Menú", command=volver).pack(side="right")
+
     ventana.bind("<Control-L>", lambda e: toggle_search())
     ventana.bind("<Control-l>", lambda e: toggle_search())
-    ventana.protocol("WM_DELETE_WINDOW", ventana.destroy)
+    ventana.bind("<Escape>", lambda e: volver())
+    ventana.protocol("WM_DELETE_WINDOW", volver)
     buscar_productos()

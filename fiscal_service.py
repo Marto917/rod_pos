@@ -164,6 +164,7 @@ CONFIG_KEYS = [
     "ticket_ancho_mm",
     "ticket_incluir_logo",
     "ticket_auto_imprimir",
+    "ticket_impresora",
     "fiscal_auto_emitir",
     "fiscal_tipo_default",
     "cobro_rapido",
@@ -270,6 +271,25 @@ def _cuit_solo_digitos(cuit):
     return "".join(c for c in (cuit or "") if c.isdigit())
 
 
+def validar_cuit_digito(cuit):
+    """Valida dígito verificador de CUIT/CUIL argentino (11 dígitos)."""
+    doc = _cuit_solo_digitos(cuit)
+    if len(doc) != 11:
+        return False
+    if doc == "0" * 11:
+        return False
+    pesos = (5, 4, 3, 2, 7, 6, 5, 4, 3, 2)
+    suma = sum(int(doc[i]) * pesos[i] for i in range(10))
+    resto = 11 - (suma % 11)
+    if resto == 11:
+        dig = 0
+    elif resto == 10:
+        dig = 9
+    else:
+        dig = resto
+    return dig == int(doc[10])
+
+
 def _resolver_doc_receptor(payload):
     """
     Doc del comprador para WSFE / ticket.
@@ -277,6 +297,11 @@ def _resolver_doc_receptor(payload):
     """
     doc = _cuit_solo_digitos(str(payload.get("cliente_doc") or ""))
     if len(doc) == 11:
+        if not validar_cuit_digito(doc):
+            raise RuntimeError(
+                "CUIT/CUIL invalido (digito verificador). "
+                "Revisa el numero o deja vacio para Consumidor Final."
+            )
         return 80, int(doc), 5
     if 7 <= len(doc) <= 8:
         return 96, int(doc), 5

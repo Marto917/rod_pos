@@ -1,5 +1,6 @@
 import tkinter as tk
-from tkinter import ttk, messagebox, filedialog
+from tkinter import ttk, filedialog
+from ui import dialogs as messagebox
 import sqlite3
 from datetime import datetime, timedelta
 import os
@@ -10,12 +11,15 @@ from db_init import get_db_path, get_base_dir
 from fiscal_service import get_fiscal_config, save_fiscal_config
 from licencia import obtener_hwid, activar_licencia
 from licencia import obtener_dias_restantes, obtener_fecha_vencimiento
+from ui import theme as ui_theme
 
 def open_admin_panel(user_id, user_name):
     ventana = tk.Tk()
     ventana.title(f"Panel Admin - {user_name}")
     ventana.state('zoomed')
-    ventana.configure(bg='#f0f0f0')
+    ui_theme.apply_window(ventana)
+    style = ttk.Style(ventana)
+    ui_theme.apply_ttk_style(style)
     
     base_dir = get_base_dir()
     # Conexión a BD
@@ -784,14 +788,134 @@ def open_admin_panel(user_id, user_name):
             ttk.Button(form, text="Examinar...", command=_seleccionar_archivo).grid(
                 row=idx, column=2, sticky="w", padx=4, pady=4
             )
+
+    # Impresora térmica: selector con impresoras instaladas en Windows
+    row_imp = len(campos)
+    ttk.Label(form, text="Impresora térmica:").grid(row=row_imp, column=0, sticky="e", padx=5, pady=4)
+    fiscal_vars["ticket_impresora"] = tk.StringVar(value=fiscal_cfg.get("ticket_impresora", ""))
+    combo_impresora = ttk.Combobox(
+        form,
+        textvariable=fiscal_vars["ticket_impresora"],
+        width=55,
+    )
+    combo_impresora.grid(row=row_imp, column=1, sticky="w", padx=5, pady=4)
+
+    def _cargar_impresoras(mostrar_msg=False):
+        from services.ticket_print import (
+            es_impresora_virtual,
+            get_default_printer,
+            list_printers,
+        )
+
+        printers = list_printers()
+        termicas = []
+        otras = []
+        virtuales = []
+        for p in printers:
+            if es_impresora_virtual(p):
+                virtuales.append(p)
+            else:
+                pl = p.lower()
+                if any(
+                    k in pl
+                    for k in (
+                        "xp-",
+                        "xp58",
+                        "pos-",
+                        "xprinter",
+                        "thermal",
+                        "termica",
+                        "ticket",
+                        "epson tm",
+                        "rongta",
+                    )
+                ):
+                    termicas.append(p)
+                else:
+                    otras.append(p)
+        valores = [""] + termicas + otras + virtuales
+        actual = (fiscal_vars["ticket_impresora"].get() or "").strip()
+        combo_impresora["values"] = valores
+        if actual and actual in valores:
+            fiscal_vars["ticket_impresora"].set(actual)
+        elif actual:
+            # Mantener el nombre guardado aunque no esté en la lista (otra PC / USB)
+            combo_impresora["values"] = [actual] + [v for v in valores if v != actual]
+            fiscal_vars["ticket_impresora"].set(actual)
+        else:
+            try:
+                d = get_default_printer()
+            except Exception:
+                d = ""
+            if d and d in valores and not es_impresora_virtual(d):
+                fiscal_vars["ticket_impresora"].set(d)
+            elif termicas:
+                fiscal_vars["ticket_impresora"].set(termicas[0])
+            else:
+                fiscal_vars["ticket_impresora"].set("")
+        if mostrar_msg:
+            messagebox.showinfo(
+                "Impresoras",
+                "Se encontraron %d impresoras.\nElegí la térmica (ej. XP-58) y guardá."
+                % max(0, len(valores) - 1),
+                parent=ventana,
+            )
+
+    def _probar_impresora():
+        from services.ticket_print import imprimir_lineas
+
+        nombre = (fiscal_vars["ticket_impresora"].get() or "").strip()
+        if not nombre:
+            messagebox.showwarning(
+                "Impresora",
+                "Seleccioná una impresora de la lista primero.",
+                parent=ventana,
+            )
+            return
+        try:
+            usada = imprimir_lineas(
+                [
+                    "ROD POS - PRUEBA",
+                    "Impresora: %s" % nombre,
+                    "Si lees esto, la termica OK",
+                    "----------------------------",
+                ],
+                doc_name="ROD POS prueba",
+                printer_name=nombre,
+                wait=True,
+            )
+            messagebox.showinfo(
+                "Impresora",
+                "Prueba enviada a:\n%s\n\n¿Salió el ticket?" % usada,
+                parent=ventana,
+            )
+        except Exception as e:
+            messagebox.showerror(
+                "Impresora",
+                "No se pudo imprimir la prueba:\n%s" % e,
+                parent=ventana,
+            )
+
+    btns_imp = ttk.Frame(form)
+    btns_imp.grid(row=row_imp, column=2, sticky="w", padx=4, pady=4)
+    ttk.Button(btns_imp, text="Actualizar", command=lambda: _cargar_impresoras(True)).pack(
+        side="left", padx=(0, 4)
+    )
+    ttk.Button(btns_imp, text="Probar", command=_probar_impresora).pack(side="left")
+    _cargar_impresoras(False)
+
     ttk.Label(
         form,
         text="Nota: para emitir ARCA en produccion necesitás cert/key validos y pyafipws instalado.",
         font=("Arial", 9, "italic"),
-    ).grid(row=len(campos), column=0, columnspan=2, pady=(10, 6), sticky="w")
+    ).grid(row=row_imp + 1, column=0, columnspan=3, pady=(10, 6), sticky="w")
 
     def guardar_config_fiscal():
         data = {k: v.get().strip() for k, v in fiscal_vars.items()}
+        # Limpiar sufijo visual si quedó
+        imp = data.get("ticket_impresora") or ""
+        if "  (virtual" in imp:
+            data["ticket_impresora"] = imp.split("  (virtual")[0].strip()
         errores = []
         cuit = data.get("empresa_cuit", "")
         if cuit and (not cuit.isdigit() or len(cuit) != 11):
@@ -827,29 +951,58 @@ def open_admin_panel(user_id, user_name):
         if tipo_def not in ("A", "B", "C"):
             errores.append("Tipo fiscal default debe ser A, B o C.")
         data["fiscal_tipo_default"] = tipo_def
+        from services.ticket_print import es_impresora_virtual
+
+        if data.get("ticket_impresora") and es_impresora_virtual(data["ticket_impresora"]):
+            errores.append(
+                "La impresora elegida es virtual (PDF/OneNote/XPS). Elegí la térmica (XP-58)."
+            )
         if errores:
             messagebox.showerror("ARCA/Ticket", "\n".join(errores), parent=ventana)
             return
+        # Si auto-imprimir viene vacío, forzar 1
+        if not data.get("ticket_auto_imprimir"):
+            data["ticket_auto_imprimir"] = "1"
+            fiscal_vars["ticket_auto_imprimir"].set("1")
         save_fiscal_config(data)
-        messagebox.showinfo("ARCA/Ticket", "Configuracion guardada.")
+        # Intentar dejarla también como predeterminada de Windows
+        imp_ok = (data.get("ticket_impresora") or "").strip()
+        if imp_ok:
+            try:
+                import ctypes
+
+                ok = ctypes.windll.winspool.SetDefaultPrinterW(imp_ok)
+                if not ok:
+                    raise ctypes.WinError(ctypes.get_last_error())
+            except Exception:
+                pass
+        messagebox.showinfo(
+            "ARCA/Ticket",
+            "Configuracion guardada.\nImpresora: %s\nAuto imprimir: %s"
+            % (
+                data.get("ticket_impresora") or "(automática / predeterminada Windows)",
+                data.get("ticket_auto_imprimir"),
+            ),
+            parent=ventana,
+        )
 
     def ayuda_impresion():
         msg = (
-            "Impresion de ticket:\n"
-            "1) En Windows, configurá la Xprinter como impresora predeterminada.\n"
-            "2) El sistema imprime enviando el PDF al comando print del sistema.\n"
-            "3) Auto imprimir ticket = 1 (recomendado en local lleno).\n"
-            "4) Emitir Factura C automático = 1: cobra sin preguntar tipo fiscal.\n"
-            "5) Datos del cliente (F3) son opcionales; si los carga, salen en el ticket.\n"
-            "6) Ancho ticket 58 mm."
+            "Impresión de ticket (térmica):\n"
+            "1) En esta pestaña elegí la impresora (ej. XP-58) y Guardá.\n"
+            "2) Usá 'Probar' para mandar un ticket de prueba.\n"
+            "3) ROD POS imprime por ESC/POS. NO uses Acrobat ni el PDF.\n"
+            "4) Auto imprimir factura = 1.\n"
+            "5) Ancho ticket 58 mm.\n"
+            "6) Si la lista está vacía, conectá la térmica y tocá Actualizar."
         )
         messagebox.showinfo("Ayuda impresion", msg, parent=ventana)
 
     ttk.Button(form, text="Guardar configuracion", command=guardar_config_fiscal).grid(
-        row=len(campos) + 1, column=1, sticky="w", pady=8
+        row=row_imp + 2, column=1, sticky="w", pady=8
     )
     ttk.Button(form, text="Ayuda impresion", command=ayuda_impresion).grid(
-        row=len(campos) + 2, column=1, sticky="w", pady=4
+        row=row_imp + 3, column=1, sticky="w", pady=4
     )
 
     # ----------------------------

@@ -161,6 +161,16 @@ class PosLanHandler(BaseHTTPRequestHandler):
                 result = crear_venta_local(payload)
                 return _json_response(self, 200, result)
 
+            if path == "/api/ventas/anular":
+                from services.stock_ops import anular_venta_local
+
+                result = anular_venta_local(
+                    int(payload["venta_id"]),
+                    usuario_id=payload.get("usuario_id"),
+                    motivo=str(payload.get("motivo") or "ANULACION"),
+                )
+                return _json_response(self, 200, result)
+
             if path == "/api/fiscal/enqueue":
                 from fiscal_service import emitir_o_encolar
 

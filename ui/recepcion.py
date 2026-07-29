@@ -3,6 +3,7 @@ from tkinter import ttk
 from tkinter.constants import END
 
 from services.stock_ops import StockError, get_product_by_barcode, recepcion_producto
+from ui import theme as ui_theme
 
 
 def open_recepcion_panel(user_id, user_name):
@@ -12,14 +13,10 @@ def open_recepcion_panel(user_id, user_name):
         ventana.state("zoomed")
     except Exception:
         pass
-    ventana.configure(bg="#f9f9f9")
+    ui_theme.apply_window(ventana)
 
-    style = ttk.Style()
-    style.theme_use("clam")
-    style.configure("TLabel", background="#f9f9f9", font=("Segoe UI", 11))
-    style.configure("TButton", font=("Segoe UI", 11))
-    style.configure("Treeview", font=("Segoe UI", 10), rowheight=28)
-    style.configure("Treeview.Heading", font=("Segoe UI", 11, "bold"))
+    style = ttk.Style(ventana)
+    ui_theme.apply_ttk_style(style)
 
     productos_recepcionados = []
 
@@ -216,8 +213,9 @@ def open_recepcion_panel(user_id, user_name):
     tree_recepcion.pack(fill=tk.BOTH, expand=True)
 
     ttk.Button(frame, text="Recepcionar Productos", command=confirmar_recepcion).pack(pady=5)
-    ttk.Button(frame, text="Volver al Menú", command=ventana.destroy).pack()
+    ttk.Button(frame, text="Volver al Menú", command=ventana.destroy).pack(pady=5)
 
     ventana.bind("<Return>", lambda e: agregar_temporal())
     ventana.bind("<F5>", eliminar_item)
+    ventana.bind("<Escape>", lambda e: ventana.destroy())
     entry_codigo.focus_set()

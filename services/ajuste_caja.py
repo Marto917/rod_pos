@@ -52,6 +52,89 @@ def _http_json(method: str, path: str, payload: dict | None = None, timeout: flo
         raise ValueError("No se pudo conectar al servidor LAN: %s" % e) from e
 
 
+def _pdf_safe(texto) -> str:
+    """Core fonts de FPDF solo latin-1: evita PDFs rotos por unicode."""
+    t = str(texto if texto is not None else "")
+    repl = {
+        "á": "a", "é": "e", "í": "i", "ó": "o", "ú": "u",
+        "Á": "A", "É": "E", "Í": "I", "Ó": "O", "Ú": "U",
+        "ñ": "n", "Ñ": "N", "ü": "u", "Ü": "U",
+        "¿": "?", "¡": "!", "°": "o", "–": "-", "—": "-",
+        "“": '"', "”": '"', "‘": "'", "’": "'", "…": "...",
+        "→": "->", "←": "<-", "€": "EUR",
+    }
+    for a, b in repl.items():
+        t = t.replace(a, b)
+    return t.encode("latin-1", "replace").decode("latin-1")
+
+
+def titulo_ajuste(nro_dia: int, fecha: str | None = None) -> str:
+    """Ej: Ajuste de caja 1 - 26/07/2026"""
+    if fecha:
+        try:
+            if len(fecha) >= 10 and fecha[4] == "-":
+                d = datetime.strptime(fecha[:10], "%Y-%m-%d")
+            else:
+                d = datetime.strptime(fecha[:10], "%d/%m/%Y")
+            fecha_txt = d.strftime("%d/%m/%Y")
+        except Exception:
+            fecha_txt = (fecha or "")[:10]
+    else:
+        fecha_txt = datetime.now().strftime("%d/%m/%Y")
+    return "Ajuste de caja %s - %s" % (int(nro_dia or 1), fecha_txt)
+
+
+def proximo_nro_dia(fecha_dia: str | None = None) -> int:
+    fecha_dia = fecha_dia or datetime.now().strftime("%Y-%m-%d")
+    conn = get_connection()
+    try:
+        c = conn.cursor()
+        c.execute(
+            """
+            SELECT COALESCE(MAX(nro_dia), 0)
+            FROM ajustes_caja
+            WHERE date(fecha)=?
+            """,
+            (fecha_dia,),
+        )
+        row = c.fetchone()
+        return int((row[0] if row else 0) or 0) + 1
+    finally:
+        conn.close()
+
+
+def lineas_comprobante_ajuste(
+    *,
+    nro_dia: int,
+    user_name: str,
+    monto: float,
+    metodo_desde: str,
+    metodo_hacia: str,
+    observaciones: str,
+    fecha: str,
+    terminal_id: str | None = None,
+    sucursal: str | None = None,
+) -> list[str]:
+    titulo = titulo_ajuste(nro_dia, fecha)
+    return [
+        titulo,
+        "-" * 32,
+        "Sucursal: %s" % (sucursal or "-"),
+        "Terminal: %s" % (terminal_id or "-"),
+        "Cajero: %s" % user_name,
+        "Fecha: %s" % fecha,
+        "Nro del dia: %s" % nro_dia,
+        "-" * 32,
+        "Sacar de: %s" % metodo_desde,
+        "Poner en: %s" % metodo_hacia,
+        "Monto: $%.2f" % monto,
+        "Obs: %s" % (observaciones or "Ajuste de forma de pago"),
+        "-" * 32,
+        "Comprobante interno (no fiscal)",
+        titulo,
+    ]
+
+
 def registrar_ajuste(
     *,
     usuario_id: int,
@@ -86,9 +169,11 @@ def registrar_ajuste(
         data = _http_json("POST", "/api/ajustes", payload)
         if not data.get("ok"):
             raise ValueError(data.get("error") or "No se pudo registrar el ajuste")
-        # Generar PDF también en la PC cliente
+        nro_dia = int(data.get("nro_dia") or 1)
+        fecha = data.get("fecha") or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         pdf_path = generar_pdf_ajuste(
             ajuste_id=data.get("ajuste_id") or 0,
+            nro_dia=nro_dia,
             user_name=user_name,
             monto=monto,
             metodo_desde=desde,
@@ -96,9 +181,22 @@ def registrar_ajuste(
             observaciones=payload["observaciones"],
             terminal_id=payload["terminal_id"],
             sucursal=payload["sucursal"],
-            fecha=data.get("fecha") or datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            fecha=fecha,
         )
         data["pdf_path"] = pdf_path
+        data["nro_dia"] = nro_dia
+        data["titulo"] = titulo_ajuste(nro_dia, fecha)
+        data["lineas"] = lineas_comprobante_ajuste(
+            nro_dia=nro_dia,
+            user_name=user_name,
+            monto=monto,
+            metodo_desde=desde,
+            metodo_hacia=hacia,
+            observaciones=payload["observaciones"],
+            fecha=fecha,
+            terminal_id=payload["terminal_id"],
+            sucursal=payload["sucursal"],
+        )
         return data
 
     return registrar_ajuste_local(**payload)
@@ -119,13 +217,36 @@ def registrar_ajuste_local(
     desde = _norm_metodo_pago(metodo_desde)
     hacia = _norm_metodo_pago(metodo_hacia)
     ahora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    fecha_dia = ahora[:10]
     cfg = load_config()
     terminal_id = terminal_id or cfg.get("terminal_id")
     sucursal = sucursal or cfg.get("sucursal_nombre")
     obs = observaciones or "Ajuste de forma de pago"
+    nro_dia = proximo_nro_dia(fecha_dia)
+
+    conn = get_connection()
+    try:
+        c = conn.cursor()
+        c.execute(
+            """
+            INSERT INTO ajustes_caja (
+                usuario_id, fecha, monto, metodo_desde, metodo_hacia,
+                observaciones, pdf_path, terminal_id, nro_dia
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (usuario_id, ahora, monto, desde, hacia, obs, None, terminal_id, nro_dia),
+        )
+        ajuste_id = c.lastrowid
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
     pdf_path = generar_pdf_ajuste(
-        ajuste_id=0,
+        ajuste_id=ajuste_id,
+        nro_dia=nro_dia,
         user_name=user_name,
         monto=monto,
         metodo_desde=desde,
@@ -139,17 +260,7 @@ def registrar_ajuste_local(
     conn = get_connection()
     try:
         c = conn.cursor()
-        c.execute(
-            """
-            INSERT INTO ajustes_caja (
-                usuario_id, fecha, monto, metodo_desde, metodo_hacia,
-                observaciones, pdf_path, terminal_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (usuario_id, ahora, monto, desde, hacia, obs, pdf_path, terminal_id),
-        )
-        ajuste_id = c.lastrowid
-        # Renombrar PDF con id real si hace falta
+        c.execute("UPDATE ajustes_caja SET pdf_path=? WHERE id=?", (pdf_path, ajuste_id))
         conn.commit()
     except Exception:
         conn.rollback()
@@ -160,11 +271,24 @@ def registrar_ajuste_local(
     return {
         "ok": True,
         "ajuste_id": ajuste_id,
+        "nro_dia": nro_dia,
+        "titulo": titulo_ajuste(nro_dia, ahora),
         "fecha": ahora,
         "monto": monto,
         "metodo_desde": desde,
         "metodo_hacia": hacia,
         "pdf_path": pdf_path,
+        "lineas": lineas_comprobante_ajuste(
+            nro_dia=nro_dia,
+            user_name=user_name,
+            monto=monto,
+            metodo_desde=desde,
+            metodo_hacia=hacia,
+            observaciones=obs,
+            fecha=ahora,
+            terminal_id=terminal_id,
+            sucursal=sucursal,
+        ),
     }
 
 
@@ -174,7 +298,8 @@ def listar_ajustes_pendientes(usuario_id: int, fecha: str) -> list[dict]:
         c = conn.cursor()
         c.execute(
             """
-            SELECT id, fecha, monto, metodo_desde, metodo_hacia, observaciones, terminal_id
+            SELECT id, fecha, monto, metodo_desde, metodo_hacia, observaciones,
+                   terminal_id, nro_dia
             FROM ajustes_caja
             WHERE date(fecha)=?
               AND usuario_id=?
@@ -225,6 +350,7 @@ def marcar_ajustes_en_arqueo(usuario_id: int, fecha: str, arqueo_id: int) -> Non
 def generar_pdf_ajuste(
     *,
     ajuste_id: int,
+    nro_dia: int,
     user_name: str,
     monto: float,
     metodo_desde: str,
@@ -236,47 +362,78 @@ def generar_pdf_ajuste(
 ) -> str:
     from fpdf import FPDF
 
-    reportes = os.path.join(get_base_dir(), "reportes")
-    os.makedirs(reportes, exist_ok=True)
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    path = os.path.join(reportes, "ajuste_caja_%s_%s.pdf" % (stamp, ajuste_id or "tmp"))
+    # Misma carpeta que el resto de comprobantes
+    out_dir = os.path.join(get_base_dir(), "comprobantes")
+    os.makedirs(out_dir, exist_ok=True)
+    try:
+        d = datetime.strptime(fecha[:10], "%Y-%m-%d")
+        fecha_arch = d.strftime("%d%m%Y")
+        fecha_txt = d.strftime("%d/%m/%Y")
+    except Exception:
+        fecha_arch = datetime.now().strftime("%d%m%Y")
+        fecha_txt = datetime.now().strftime("%d/%m/%Y")
 
-    pdf = FPDF()
+    titulo = titulo_ajuste(nro_dia, fecha)
+    path = os.path.join(
+        out_dir,
+        "ajuste_caja_%02d_%s.pdf" % (int(nro_dia or 1), fecha_arch),
+    )
+    # Si ya existe (reintento), agregar id
+    if os.path.exists(path):
+        path = os.path.join(
+            out_dir,
+            "ajuste_caja_%02d_%s_id%s.pdf" % (int(nro_dia or 1), fecha_arch, ajuste_id or 0),
+        )
+
+    pdf = FPDF(unit="mm", format="A4")
+    pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
-    pdf.set_font("Arial", "B", 16)
-    pdf.cell(0, 10, "AJUSTE DE CAJA", ln=1, align="C")
-    pdf.set_font("Arial", size=11)
-    pdf.cell(0, 8, "ROD POS - Correccion de forma de pago", ln=1, align="C")
+    pdf.set_font("Helvetica", "B", 16)
+    pdf.cell(0, 10, _pdf_safe("AJUSTE DE CAJA"), new_x="LMARGIN", new_y="NEXT", align="C")
+    pdf.set_font("Helvetica", "B", 12)
+    pdf.cell(0, 8, _pdf_safe(titulo), new_x="LMARGIN", new_y="NEXT", align="C")
+    pdf.set_font("Helvetica", size=11)
+    pdf.cell(0, 8, _pdf_safe("Correccion de forma de pago"), new_x="LMARGIN", new_y="NEXT", align="C")
     pdf.ln(6)
+
     for label, value in [
         ("Sucursal", sucursal or ""),
         ("Terminal", terminal_id or ""),
         ("Cajero", user_name),
         ("Fecha", fecha),
-        ("Nro ajuste", str(ajuste_id or "-")),
+        ("Nro del dia", "%s (%s)" % (nro_dia, fecha_txt)),
+        ("ID interno", str(ajuste_id or "-")),
     ]:
-        pdf.cell(55, 7, "%s:" % label, border=0)
-        pdf.cell(0, 7, str(value), ln=1)
+        pdf.cell(55, 7, _pdf_safe("%s:" % label), border=0)
+        pdf.cell(0, 7, _pdf_safe(value), new_x="LMARGIN", new_y="NEXT")
 
     pdf.ln(6)
-    pdf.set_font("Arial", "B", 12)
-    pdf.cell(0, 8, "Movimiento", ln=1)
-    pdf.set_font("Arial", size=11)
-    pdf.cell(90, 8, "Sacar de", border=1)
-    pdf.cell(90, 8, metodo_desde, border=1, ln=1)
-    pdf.cell(90, 8, "Poner en", border=1)
-    pdf.cell(90, 8, metodo_hacia, border=1, ln=1)
-    pdf.cell(90, 8, "Monto", border=1)
-    pdf.cell(90, 8, "$%.2f" % monto, border=1, ln=1)
+    pdf.set_font("Helvetica", "B", 12)
+    pdf.cell(0, 8, _pdf_safe("Movimiento"), new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", size=11)
+    pdf.cell(90, 8, _pdf_safe("Sacar de"), border=1)
+    pdf.cell(90, 8, _pdf_safe(metodo_desde), border=1, new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(90, 8, _pdf_safe("Poner en"), border=1)
+    pdf.cell(90, 8, _pdf_safe(metodo_hacia), border=1, new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(90, 8, _pdf_safe("Monto"), border=1)
+    pdf.cell(90, 8, _pdf_safe("$%.2f" % monto), border=1, new_x="LMARGIN", new_y="NEXT")
     pdf.ln(6)
-    pdf.multi_cell(0, 7, "Observaciones: %s" % (observaciones or "Ninguna"))
+    pdf.multi_cell(0, 7, _pdf_safe("Observaciones: %s" % (observaciones or "Ninguna")))
     pdf.ln(8)
-    pdf.set_font("Arial", "I", 9)
+    pdf.set_font("Helvetica", "I", 9)
     pdf.multi_cell(
         0,
         5,
-        "Este comprobante no es fiscal. Solo corrige el medio de pago "
-        "para el cierre de caja del dia.",
+        _pdf_safe(
+            "Este comprobante no es fiscal. Solo corrige el medio de pago "
+            "para el cierre de caja del dia."
+        ),
     )
     pdf.output(path)
+
+    # Validación mínima: debe empezar con %PDF
+    with open(path, "rb") as fh:
+        head = fh.read(5)
+    if head != b"%PDF-":
+        raise ValueError("El PDF de ajuste no se genero correctamente: %s" % path)
     return path

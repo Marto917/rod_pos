@@ -1,14 +1,18 @@
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk
+from ui import dialogs as messagebox
 
 from fiscal_service import obtener_pendientes, reintentar_pendiente
+from ui import theme as ui_theme
 
 
 def open_arca_pendientes_panel(user_id, user_name):
     ventana = tk.Toplevel()
     ventana.title("Pendientes ARCA - %s" % user_name)
     ventana.geometry("900x500")
-    ventana.state("zoomed")
+    ui_theme.apply_window(ventana, zoomed=True)
+    style = ttk.Style(ventana)
+    ui_theme.apply_ttk_style(style)
 
     frame = ttk.Frame(ventana, padding=10)
     frame.pack(fill="both", expand=True)
@@ -73,6 +77,7 @@ def open_arca_pendientes_panel(user_id, user_name):
     ttk.Button(btns, text="Actualizar", command=cargar).pack(side="left", padx=4)
     ttk.Button(btns, text="Reintentar seleccionado", command=reintentar_sel).pack(side="left", padx=4)
     ttk.Button(btns, text="Reintentar todos", command=reintentar_todos).pack(side="left", padx=4)
-    ttk.Button(btns, text="Cerrar", command=ventana.destroy).pack(side="right", padx=4)
+    ttk.Button(btns, text="Volver al Menú", command=ventana.destroy).pack(side="right", padx=4)
 
+    ventana.bind("<Escape>", lambda e: ventana.destroy())
     cargar()

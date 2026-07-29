@@ -1,7 +1,7 @@
 from db_init import init_db
 from ui.login import open_login
 from ui.menu_vendedor import open_vendor_panel
-from tkinter import messagebox
+from ui import dialogs as messagebox
 from pos_config import is_server_mode, load_config
 
 

@@ -69,11 +69,31 @@ def _norm_metodo_pago(metodo: str | None) -> str:
     )
     if m == "EFECTIVO":
         return "EFECTIVO"
+    if m == "MIXTO":
+        return "MIXTO"
     if "MERCADO" in m or m in ("MP", "MERCADOPAGO"):
         return "MERCADOPAGO"
     if "TARJETA" in m or "DEBITO" in m or "CREDITO" in m:
         return "TARJETA"
     return m or "OTROS"
+
+
+def _fmt_pagos_label(metodo: str, pagos: list[dict] | None) -> str:
+    """Etiqueta para listados: MIXTO (E 500.00 + T 300.00)."""
+    m = _norm_metodo_pago(metodo)
+    if m != "MIXTO" or not pagos:
+        return m
+    short = {"EFECTIVO": "E", "TARJETA": "T", "MERCADOPAGO": "MP"}
+    parts = []
+    for p in pagos:
+        met = _norm_metodo_pago(p.get("metodo"))
+        mon = _money(p.get("monto"))
+        if mon <= 0:
+            continue
+        parts.append("%s %.2f" % (short.get(met, met[:2]), mon))
+    if not parts:
+        return "MIXTO"
+    return "MIXTO (%s)" % " + ".join(parts)
 
 
 def resumen_pendiente_local(usuario_id: int, fecha: str) -> dict[str, Any]:
@@ -93,18 +113,62 @@ def resumen_pendiente_local(usuario_id: int, fecha: str) -> dict[str, Any]:
             (fecha, usuario_id),
         )
         ventas_raw = [dict(row) for row in c.fetchall()]
+        ids = [int(v["id"]) for v in ventas_raw]
+        pagos_por_venta: dict[int, list[dict]] = {i: [] for i in ids}
+        if ids:
+            placeholders = ",".join("?" for _ in ids)
+            try:
+                c.execute(
+                    "SELECT venta_id, metodo, monto FROM venta_pagos WHERE venta_id IN (%s)"
+                    % placeholders,
+                    ids,
+                )
+                for row in c.fetchall():
+                    vid = int(row["venta_id"])
+                    pagos_por_venta.setdefault(vid, []).append(
+                        {
+                            "metodo": _norm_metodo_pago(row["metodo"]),
+                            "monto": _money(row["monto"]),
+                        }
+                    )
+            except Exception:
+                # Base vieja sin tabla venta_pagos
+                pagos_por_venta = {i: [] for i in ids}
+
         ventas = []
         for v in ventas_raw:
             v = dict(v)
-            v["metodo_pago"] = _norm_metodo_pago(v.get("metodo_pago"))
+            vid = int(v["id"])
+            metodo = _norm_metodo_pago(v.get("metodo_pago"))
+            pagos = pagos_por_venta.get(vid) or []
+            # Si no hay filas en venta_pagos, tratar como pago único
+            if not pagos and metodo and metodo != "MIXTO":
+                pagos = [{"metodo": metodo, "monto": _money(v.get("total"))}]
+            v["metodo_pago"] = metodo
+            v["pagos"] = pagos
+            v["metodo_label"] = _fmt_pagos_label(metodo, pagos)
             ventas.append(v)
 
         por_metodo: dict[str, dict[str, float]] = {}
         for v in ventas:
-            metodo = v["metodo_pago"]
-            bucket = por_metodo.setdefault(metodo, {"tickets": 0, "total": 0.0})
-            bucket["tickets"] += 1
-            bucket["total"] += _money(v.get("total"))
+            pagos = v.get("pagos") or []
+            if v["metodo_pago"] == "MIXTO" and pagos:
+                for p in pagos:
+                    met = _norm_metodo_pago(p.get("metodo"))
+                    mon = _money(p.get("monto"))
+                    if mon <= 0:
+                        continue
+                    bucket = por_metodo.setdefault(met, {"tickets": 0, "total": 0.0})
+                    bucket["tickets"] += 1
+                    bucket["total"] += mon
+            else:
+                metodo = v["metodo_pago"]
+                if metodo == "MIXTO":
+                    # MIXTO sin desglose: va a OTROS para no distorsionar
+                    metodo = "OTROS"
+                bucket = por_metodo.setdefault(metodo, {"tickets": 0, "total": 0.0})
+                bucket["tickets"] += 1
+                bucket["total"] += _money(v.get("total"))
 
         from services.ajuste_caja import aplicar_ajustes_a_por_metodo, listar_ajustes_pendientes
 
@@ -379,7 +443,7 @@ def generar_excel_cierre(
             [
                 v["id"],
                 v["fecha"],
-                v.get("metodo_pago") or "",
+                v.get("metodo_label") or v.get("metodo_pago") or "",
                 _money(v.get("total")),
                 v.get("terminal_id") or "",
             ]

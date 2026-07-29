@@ -82,6 +82,17 @@ def init_db():
                cantidad INTEGER NOT NULL,
                precio_unitario REAL NOT NULL)''')
 
+    # Desglose de pagos (pago mixto: 2+ métodos en una venta)
+    c.execute('''CREATE TABLE IF NOT EXISTS venta_pagos (
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               venta_id INTEGER NOT NULL,
+               metodo TEXT NOT NULL,
+               monto REAL NOT NULL,
+               FOREIGN KEY (venta_id) REFERENCES ventas (id))''')
+    c.execute(
+        "CREATE INDEX IF NOT EXISTS idx_venta_pagos_venta ON venta_pagos (venta_id)"
+    )
+
     # Campos fiscales de ventas (migración segura)
     ensure_column(c, "ventas", "fiscal_solicitado", "INTEGER DEFAULT 0")
     ensure_column(c, "ventas", "fiscal_estado", "TEXT DEFAULT 'NO_SOLICITADO'")
@@ -129,7 +140,9 @@ def init_db():
                pdf_path TEXT,
                terminal_id TEXT,
                arqueo_id INTEGER,
+               nro_dia INTEGER,
                FOREIGN KEY (usuario_id) REFERENCES usuarios (id))''')
+    ensure_column(c, "ajustes_caja", "nro_dia", "INTEGER")
 
     # Configuración fiscal / ticket (clave-valor)
     c.execute('''CREATE TABLE IF NOT EXISTS fiscal_config (
@@ -177,6 +190,7 @@ def init_db():
         "ticket_ancho_mm": "58",
         "ticket_incluir_logo": "1",
         "ticket_auto_imprimir": "1",
+        "ticket_impresora": "",
         "fiscal_auto_emitir": "1",
         "fiscal_tipo_default": "C",
         "cobro_rapido": "1",
