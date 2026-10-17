@@ -1,0 +1,16 @@
+{
+  "name": "Consulta de precios",
+  "short_name": "Precios",
+  "description": "Consulta de precios para el personal del salón",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#12382c",
+  "theme_color": "#12382c",
+  "lang": "es",
+  "icons": [
+    { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
