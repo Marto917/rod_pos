@@ -55,6 +55,12 @@ Salida esperada:
 
 ## 5) Configuracion ARCA
 
+### Carga rapida
+
+1. Completar `arca_datos.json` a partir de `arca_datos.ejemplo.json`
+2. Copiar `empresa.crt` / `empresa.key` a `certificados/`
+3. Ejecutar `py cargar_arca_config.py`
+
 ### Datos requeridos en Admin -> ARCA/Ticket
 
 - `empresa_razon_social`
@@ -63,8 +69,8 @@ Salida esperada:
 - `arca_punto_venta` (ej. 4)
 - `arca_ambiente` (`produccion` o `homologacion`)
 - `arca_cuit_representada`
-- `arca_cert_path` (ruta absoluta `.crt`)
-- `arca_key_path` (ruta absoluta `.key`)
+- `arca_cert_path` (ruta relativa `certificados/empresa.crt` o absoluta)
+- `arca_key_path` (ruta relativa `certificados/empresa.key` o absoluta)
 
 ### URLs segun ambiente
 

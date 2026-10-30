@@ -932,14 +932,16 @@ def open_admin_panel(user_id, user_name):
         ancho = data.get("ticket_ancho_mm", "")
         if (not ancho.isdigit()) or int(ancho) < 40 or int(ancho) > 120:
             errores.append("Ancho ticket mm debe estar entre 40 y 120.")
+        from fiscal_service import _resolver_ruta_fiscal
+
         cert_path = data.get("arca_cert_path", "")
-        if cert_path and not os.path.exists(cert_path):
+        if cert_path and not os.path.exists(_resolver_ruta_fiscal(cert_path)):
             errores.append("No existe la ruta del certificado CRT.")
         key_path = data.get("arca_key_path", "")
-        if key_path and not os.path.exists(key_path):
+        if key_path and not os.path.exists(_resolver_ruta_fiscal(key_path)):
             errores.append("No existe la ruta de la clave KEY.")
         logo_path = data.get("ticket_logo_path", "")
-        if logo_path and not os.path.exists(logo_path):
+        if logo_path and not os.path.exists(_resolver_ruta_fiscal(logo_path)):
             errores.append("No existe la ruta del logo de ticket.")
         auto_print = data.get("ticket_auto_imprimir", "")
         if auto_print not in ("0", "1"):

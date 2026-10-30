@@ -3,3 +3,5 @@ pillow
 fpdf2
 qrcode
 pyinstaller
+# ARCA (WSAA/WSFE). En Windows también: py -m pip install "git+https://github.com/reingart/pyafipws.git"
+pyafipws

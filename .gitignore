@@ -6,9 +6,17 @@ db/*.db-shm
 db/*.db-wal
 comprobantes/
 reportes/
+cache_arca/
+debug_afip.txt
 debug_ticket.txt
 licencia.dat
 licencia_usada.hash
+arca_datos.json
+certificados/*.crt
+certificados/*.key
+certificados/*.pfx
+certificados/*.p12
+certificados/*.pem
 *.log
 .DS_Store
 Thumbs.db
