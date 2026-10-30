@@ -115,6 +115,11 @@ Necesitas en la PC del comercio:
 
 > Si tenes `.pfx`, primero exportalo a `.crt` y `.key`.
 
+Colocalos en la carpeta `certificados/` junto al EXE:
+
+- `certificados/empresa.crt`
+- `certificados/empresa.key`
+
 ### 2) Configurar punto de venta en ARCA
 
 En el ABM de ARCA/AFIP:
@@ -122,9 +127,16 @@ En el ABM de ARCA/AFIP:
 - habilita el punto de venta para Factura Electronica
 - usa ese mismo numero en el sistema (`arca_punto_venta`)
 
-### 3) Cargar datos en el panel Admin -> ARCA/Ticket
+### 3) Cargar datos fiscales (recomendado)
 
-Completar como minimo:
+Copiá el ejemplo y completá CUIT, IIBB, domicilio, etc.:
+
+```bash
+copy arca_datos.ejemplo.json arca_datos.json
+py cargar_arca_config.py
+```
+
+Tambien podés cargarlos a mano en Admin -> ARCA/Ticket:
 
 - Razon social
 - CUIT empresa
@@ -132,10 +144,10 @@ Completar como minimo:
 - Punto de venta
 - Ambiente: `produccion`
 - CUIT representada ARCA
-- Ruta certificado CRT (absoluta)
-- Ruta clave KEY (absoluta)
+- Ruta certificado CRT (`certificados/empresa.crt` o ruta absoluta)
+- Ruta clave KEY (`certificados/empresa.key` o ruta absoluta)
 
-Ejemplo de ruta Windows:
+Ejemplo de ruta Windows absoluta:
 
 - `C:\Certificados\empresa.crt`
 - `C:\Certificados\empresa.key`

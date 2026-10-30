@@ -1,0 +1,20 @@
+{
+  "empresa_razon_social": "HECTOR RICARDO RODRIGUEZ",
+  "empresa_cuit": "XXXXXXXXXXX",
+  "empresa_iibb": "XXXXXXXXXXX",
+  "empresa_inicio_actividades": "DD/MM/AAAA",
+  "empresa_domicilio": "Calle Nro, Localidad, Provincia",
+  "empresa_condicion_iva": "MONOTRIBUTO",
+  "arca_punto_venta": "4",
+  "arca_ambiente": "produccion",
+  "arca_cuit_representada": "XXXXXXXXXXX",
+  "arca_cert_path": "certificados/empresa.crt",
+  "arca_key_path": "certificados/empresa.key",
+  "ticket_pie_texto": "Gracias por su compra",
+  "ticket_ancho_mm": "58",
+  "ticket_incluir_logo": "1",
+  "ticket_auto_imprimir": "1",
+  "fiscal_auto_emitir": "1",
+  "fiscal_tipo_default": "C",
+  "cobro_rapido": "1"
+}

@@ -175,6 +175,30 @@ def _connect():
     return sqlite3.connect(get_db_path())
 
 
+def _resolver_ruta_fiscal(path):
+    """Resuelve rutas absolutas o relativas a la carpeta del EXE/script."""
+    path = (path or "").strip()
+    if not path:
+        return ""
+    if os.path.isfile(path):
+        return path
+    if os.path.isabs(path):
+        return path
+    candidato = os.path.join(get_base_dir(), path)
+    return candidato
+
+
+def _aplicar_defaults_certificados(data):
+    """Si faltan rutas de cert/key, usa certificados/empresa.{crt,key}."""
+    cert = (data.get("arca_cert_path") or "").strip()
+    key = (data.get("arca_key_path") or "").strip()
+    if not cert:
+        data["arca_cert_path"] = os.path.join("certificados", "empresa.crt")
+    if not key:
+        data["arca_key_path"] = os.path.join("certificados", "empresa.key")
+    return data
+
+
 def get_fiscal_config():
     conn = _connect()
     try:
@@ -183,7 +207,7 @@ def get_fiscal_config():
         data = {k: v for k, v in cur.fetchall()}
         for k in CONFIG_KEYS:
             data.setdefault(k, "")
-        return data
+        return _aplicar_defaults_certificados(data)
     finally:
         conn.close()
 
@@ -264,6 +288,13 @@ def _validar_config_minima(cfg):
     ]:
         if not (cfg.get(key) or "").strip():
             faltantes.append(label)
+    # Cert/key: aceptar rutas relativas a la carpeta del EXE
+    if (cfg.get("arca_cert_path") or "").strip():
+        if not os.path.isfile(_resolver_ruta_fiscal(cfg.get("arca_cert_path"))):
+            faltantes.append("Archivo certificado CRT (no existe en disco)")
+    if (cfg.get("arca_key_path") or "").strip():
+        if not os.path.isfile(_resolver_ruta_fiscal(cfg.get("arca_key_path"))):
+            faltantes.append("Archivo clave KEY (no existe en disco)")
     return faltantes
 
 
@@ -366,15 +397,17 @@ def _emitir_arca_wsfe(payload, cfg):
         wsdl_fe = "https://wswhomo.afip.gov.ar/wsfev1/service.asmx?WSDL"
         wsdl_aa = "https://wsaahomo.afip.gov.ar/ws/services/LoginCms?WSDL"
 
-    cert = cfg["arca_cert_path"].strip()
-    key = cfg["arca_key_path"].strip()
+    cert = _resolver_ruta_fiscal(cfg.get("arca_cert_path", ""))
+    key = _resolver_ruta_fiscal(cfg.get("arca_key_path", ""))
     if not cert or not os.path.isfile(cert):
         raise FileNotFoundError(
-            "No existe el archivo .crt configurado para ARCA: %s" % (cert or "<vacio>")
+            "No existe el archivo .crt configurado para ARCA: %s"
+            % (cfg.get("arca_cert_path") or "<vacio>")
         )
     if not key or not os.path.isfile(key):
         raise FileNotFoundError(
-            "No existe el archivo .key configurado para ARCA: %s" % (key or "<vacio>")
+            "No existe el archivo .key configurado para ARCA: %s"
+            % (cfg.get("arca_key_path") or "<vacio>")
         )
     cache_dir = os.path.join(get_base_dir(), "cache_arca")
     os.makedirs(cache_dir, exist_ok=True)

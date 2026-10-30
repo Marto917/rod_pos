@@ -174,16 +174,17 @@ def init_db():
              ('105', 'DESCUENTO INAUGURACIÓN 10%', 'DESCUENTO', 9999, 0, 0))
 
     config_defaults = {
-        "empresa_razon_social": "",
+        # Razón social conocida del comercio; CUIT/IIBB/certs se cargan con cargar_arca_config.py
+        "empresa_razon_social": "HECTOR RICARDO RODRIGUEZ",
         "empresa_cuit": "",
         "empresa_iibb": "",
         "empresa_inicio_actividades": "",
         "empresa_domicilio": "",
-        "empresa_condicion_iva": "RESPONSABLE INSCRIPTO",
+        "empresa_condicion_iva": "MONOTRIBUTO",
         "arca_punto_venta": "4",
         "arca_ambiente": "produccion",
-        "arca_cert_path": "",
-        "arca_key_path": "",
+        "arca_cert_path": "certificados/empresa.crt",
+        "arca_key_path": "certificados/empresa.key",
         "arca_cuit_representada": "",
         "ticket_logo_path": "",
         "ticket_pie_texto": "Gracias por su compra",
@@ -199,6 +200,16 @@ def init_db():
         c.execute(
             "INSERT OR IGNORE INTO fiscal_config (clave, valor) VALUES (?, ?)",
             (clave, valor),
+        )
+
+    # Completar claves vacías con defaults conocidos (no pisa datos ya cargados)
+    for clave, valor in config_defaults.items():
+        if not valor:
+            continue
+        c.execute(
+            "UPDATE fiscal_config SET valor = ? "
+            "WHERE clave = ? AND (valor IS NULL OR TRIM(valor) = '')",
+            (valor, clave),
         )
     
     conn.commit()
